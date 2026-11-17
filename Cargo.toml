@@ -1,0 +1,14 @@
+[package]
+name = "music-syncer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "EUPL-1.2"
+publish = false
+
+[lints.cargo]
+unused_dependencies = "warn"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", features = ["font-kit", "wayland"] }
