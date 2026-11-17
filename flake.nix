@@ -12,6 +12,10 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    beautiful-rust = {
+      url = "github:morganlinton/BeautifulRust";
+      flake = false;
+    };
   };
 
   outputs =
@@ -21,6 +25,7 @@
       crane,
       rust-overlay,
       git-hooks,
+      beautiful-rust,
       ...
     }:
     let
@@ -79,6 +84,12 @@
             };
           };
 
+          beautifulRust = pkgs.applyPatches {
+            name = "beautiful-rust";
+            src = beautiful-rust;
+            patches = [ ./nix/patches/beautiful-rust-drop-lints-config.patch ];
+          };
+
           package = craneLib.buildPackage (
             commonArgs
             // {
@@ -102,6 +113,7 @@
             commonArgs
             cargoArtifacts
             gitHooks
+            beautifulRust
             package
             runtimeLibs
             ;
@@ -140,7 +152,13 @@
           ]
           ++ env.gitHooks.enabledPackages;
           LD_LIBRARY_PATH = env.lib.makeLibraryPath env.runtimeLibs;
-          inherit (env.gitHooks) shellHook;
+          shellHook = ''
+            root=$(git rev-parse --show-toplevel)
+            mkdir -p "$root/.agents/skills"
+            for skill in rust-best-practices rust-review; do
+              ln -sfn ${env.beautifulRust}/skills/$skill "$root/.agents/skills/$skill"
+            done
+          '';
         };
       });
 

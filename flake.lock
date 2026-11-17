@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "beautiful-rust": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794158470,
+        "narHash": "sha256-wXqdHFZ1BgdoVminLY0NvUAKwu1qLol+5bsAGWcggiU=",
+        "owner": "morganlinton",
+        "repo": "BeautifulRust",
+        "rev": "b9718436d77ee7bcf17cdcb6aa27628feb95d97a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "morganlinton",
+        "repo": "BeautifulRust",
+        "type": "github"
+      }
+    },
     "crane": {
       "locked": {
         "lastModified": 1794870543,
@@ -70,6 +86,7 @@
     },
     "root": {
       "inputs": {
+        "beautiful-rust": "beautiful-rust",
         "crane": "crane",
         "git-hooks": "git-hooks",
         "nixpkgs": "nixpkgs",
