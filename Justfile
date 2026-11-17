@@ -17,20 +17,19 @@ lint:
 test *args:
     cargo nextest run --no-tests=warn {{ args }}
 
-# Format Rust and Nix files
+# Format Rust and Nix files (git hooks)
 fmt:
-    cargo fmt
-    nix fmt flake.nix
+    nix fmt
 
-# Run all sandboxed checks: package, clippy, nextest, rustfmt
+# Run all sandboxed checks: package, clippy, nextest, git hooks
 check:
     nix flake check
 
-# Update Cargo.lock, respecting the dependency cooldown
+# Update Cargo.lock
 update:
     cargo update
 
-# Update flake inputs (nixpkgs, crane, rust-overlay)
+# Update flake inputs (nixpkgs, crane, rust-overlay, git-hooks)
 update-flake:
     nix flake update
 

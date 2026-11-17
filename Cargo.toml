@@ -9,6 +9,12 @@ publish = false
 [lints.cargo]
 unused_dependencies = "warn"
 
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+allow_attributes_without_reason = "warn"
+
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", features = ["font-kit", "wayland"] }
