@@ -4,6 +4,8 @@ use gpui::{
 };
 use gpui_platform::application;
 
+mod logging;
+
 struct HelloWorld {
     text: SharedString,
 }
@@ -23,6 +25,9 @@ impl Render for HelloWorld {
 }
 
 fn main() {
+    logging::init();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
+
     application().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(500.), px(300.)), cx);
         cx.open_window(

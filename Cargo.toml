@@ -16,5 +16,10 @@ unwrap_used = "warn"
 allow_attributes_without_reason = "warn"
 
 [dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", features = ["font-kit", "wayland"] }
+jiff = { version = "0.2.42", default-features = false, features = ["std"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
