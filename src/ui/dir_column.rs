@@ -36,16 +36,23 @@ impl DirColumn {
                         let Ok(entries) = &this.listing.entries else {
                             return Vec::new();
                         };
+                        let first = range.start;
                         entries[range]
                             .iter()
-                            .map(|entry| match entry.kind {
-                                EntryKind::Directory => div()
+                            .enumerate()
+                            .map(|(offset, entry)| {
+                                // Hover state is tracked per element id; without it the
+                                // highlight only refreshes on unrelated redraws.
+                                let row = div()
+                                    .id(first + offset)
                                     .px_2()
                                     .truncate()
-                                    .text_color(rgb(theme::DIRECTORY))
-                                    .child(format!("{}/", entry.name)),
-                                EntryKind::File => {
-                                    div().px_2().truncate().child(entry.name.clone())
+                                    .hover(|style| style.bg(rgb(theme::ROW_HOVER)));
+                                match entry.kind {
+                                    EntryKind::Directory => row
+                                        .text_color(rgb(theme::DIRECTORY))
+                                        .child(format!("{}/", entry.name)),
+                                    EntryKind::File => row.child(entry.name.clone()),
                                 }
                             })
                             .collect()
