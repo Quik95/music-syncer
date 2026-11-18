@@ -1,8 +1,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, ScrollStrategy,
-    SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
+    ScrollStrategy, SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, rgb,
+    uniform_list,
 };
 
 use super::{scrollbar::vertical_scrollbar, theme};
@@ -22,6 +23,8 @@ actions!(
         SelectNextPage,
         SelectFirst,
         SelectLast,
+        OpenSelected,
+        OpenParent,
     ]
 );
 
@@ -36,7 +39,7 @@ pub struct DirColumn {
 
 impl DirColumn {
     pub fn new(listing: Listing, cx: &mut Context<Self>) -> Self {
-        let title = listing.path.display().to_string().into();
+        let title = title(&listing);
         let cursor = Cursor::new(entry_count(&listing));
         Self {
             listing,
@@ -57,6 +60,56 @@ impl DirColumn {
         self.cursor.apply(step, entry_count(&self.listing));
         if let Some(index) = self.cursor.index() {
             self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    /// Enters the active entry if it is a directory; files are ignored for now.
+    fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .cursor
+            .index()
+            .and_then(|index| self.listing.subdirectory(index))
+        else {
+            return;
+        };
+        let listing = Listing::read(path);
+        let first = Cursor::new(entry_count(&listing));
+        self.show(listing, first, ScrollStrategy::Top, cx);
+    }
+
+    /// Goes to the parent directory with the directory just left as the active entry.
+    fn open_parent(&mut self, cx: &mut Context<Self>) {
+        let Some(parent) = self.listing.path.parent() else {
+            return;
+        };
+        let listing = Listing::read(parent.to_path_buf());
+        let len = entry_count(&listing);
+        let mut cursor = Cursor::new(len);
+        if let Some(index) = self
+            .listing
+            .path
+            .file_name()
+            .and_then(|name| listing.position(name))
+        {
+            cursor.select(index, len);
+        }
+        self.show(listing, cursor, ScrollStrategy::Center, cx);
+    }
+
+    fn show(
+        &mut self,
+        listing: Listing,
+        cursor: Cursor,
+        strategy: ScrollStrategy,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!(path = %listing.path.display(), "opening directory");
+        self.title = title(&listing);
+        self.listing = listing;
+        self.cursor = cursor;
+        if let Some(index) = cursor.index() {
+            self.scroll.scroll_to_item(index, strategy);
         }
         cx.notify();
     }
@@ -100,8 +153,11 @@ impl DirColumn {
                                 // Hover state is tracked per element id; without it the
                                 // highlight only refreshes on unrelated redraws.
                                 let row = div().id(index).px_2().truncate().on_click(cx.listener(
-                                    move |this, _: &ClickEvent, window, cx| {
+                                    move |this, event: &ClickEvent, window, cx| {
                                         this.select(index, window, cx);
+                                        if event.click_count() == 2 {
+                                            this.open_selected(cx);
+                                        }
                                     },
                                 ));
                                 let row = if active == Some(index) {
@@ -141,6 +197,10 @@ impl DirColumn {
     }
 }
 
+fn title(listing: &Listing) -> SharedString {
+    listing.path.display().to_string().into()
+}
+
 fn entry_count(listing: &Listing) -> usize {
     listing.entries.as_ref().map_or(0, Vec::len)
 }
@@ -165,6 +225,13 @@ impl Render for DirColumn {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| window.focus(&this.focus_handle, cx)),
             )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    this.open_parent(cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| {
                 this.move_cursor(Move::Up(1), cx);
             }))
@@ -182,6 +249,12 @@ impl Render for DirColumn {
             }))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| {
                 this.move_cursor(Move::Last, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
+                this.open_selected(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenParent, _, cx| {
+                this.open_parent(cx);
             }))
             .flex()
             .flex_col()

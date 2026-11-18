@@ -1,4 +1,5 @@
 use std::{
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -12,6 +13,8 @@ pub enum EntryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
+    /// Exact name on disk, for building paths.
+    pub file_name: OsString,
     pub kind: EntryKind,
 }
 
@@ -32,6 +35,21 @@ impl Listing {
         }
         Self { path, entries }
     }
+
+    /// Path of the entry at `index` if it is a directory.
+    pub fn subdirectory(&self, index: usize) -> Option<PathBuf> {
+        let entry = self.entries.as_ref().ok()?.get(index)?;
+        (entry.kind == EntryKind::Directory).then(|| self.path.join(&entry.file_name))
+    }
+
+    /// Index of the entry with exactly this on-disk name.
+    pub fn position(&self, file_name: &OsStr) -> Option<usize> {
+        self.entries
+            .as_ref()
+            .ok()?
+            .iter()
+            .position(|entry| entry.file_name == file_name)
+    }
 }
 
 /// Directories first, then files; each group by case-insensitive name.
@@ -45,8 +63,10 @@ fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
             } else {
                 EntryKind::File
             };
+            let file_name = entry.file_name();
             Ok(Entry {
-                name: entry.file_name().to_string_lossy().into_owned(),
+                name: file_name.to_string_lossy().into_owned(),
+                file_name,
                 kind,
             })
         })
@@ -86,6 +106,38 @@ mod tests {
         #[cfg(unix)]
         expected.insert(1, (EntryKind::Directory, "link-to-dir".to_owned()));
         assert_eq!(names, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn subdirectory_is_only_for_directories() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir(temp.path().join("dir"))?;
+        fs::write(temp.path().join("file"), "")?;
+
+        let listing = Listing::read(temp.path().to_path_buf());
+
+        assert_eq!(listing.subdirectory(0), Some(temp.path().join("dir")));
+        assert_eq!(listing.subdirectory(1), None);
+        assert_eq!(listing.subdirectory(2), None);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_directory_resolves_to_its_real_path() -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir()?;
+        let name = OsStr::from_bytes(b"caf\xe9");
+        fs::create_dir(temp.path().join(name))?;
+
+        let listing = Listing::read(temp.path().to_path_buf());
+
+        let child = listing.subdirectory(0);
+        assert_eq!(child, Some(temp.path().join(name)));
+        assert!(child.is_some_and(|path| path.is_dir()));
+        assert_eq!(listing.position(name), Some(0));
         Ok(())
     }
 }

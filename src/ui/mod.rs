@@ -42,6 +42,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", dir_column::SelectNextPage, column),
         KeyBinding::new("home", dir_column::SelectFirst, column),
         KeyBinding::new("end", dir_column::SelectLast, column),
+        KeyBinding::new("enter", dir_column::OpenSelected, column),
+        KeyBinding::new("backspace", dir_column::OpenParent, column),
         KeyBinding::new("left", browser::FocusLeftColumn, browser),
         KeyBinding::new("right", browser::FocusRightColumn, browser),
         KeyBinding::new("tab", browser::FocusOtherColumn, browser),
