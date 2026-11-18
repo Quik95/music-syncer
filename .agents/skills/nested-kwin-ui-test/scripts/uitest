@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Drive the app inside a headless nested KWin with an isolated HOME. See ../SKILL.md.
+set -Eeuo pipefail
+
+SCRIPTS=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(git -C "$SCRIPTS" rev-parse --show-toplevel)
+T=${UITEST_DIR:-${TMPDIR:-/tmp}/$(basename -- "$ROOT")-uitest}
+SOCKET=kwin-uitest
+BIN=${UITEST_BIN:-$ROOT/target/debug/$(basename -- "$ROOT")}
+
+die() {
+  printf 'uitest: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+usage: uitest COMMAND [ARGS...]
+  start [WIDTH HEIGHT]   start dbus + headless KWin (default 1280 800) in $T
+  app [ARGS...]          build, then (re)start the app in the background with ARGS
+  shot [FILE]            full-screen PNG of the nested session; prints the path
+  input CMD [ARGS...]    move X Y | click [N] | right | middle | back | forward
+                         | key KEY... (e.g. enter, ctrl+shift+tab)
+  log                    app stdout/stderr so far
+  home                   print the isolated HOME (put fixtures here)
+  env                    print exports for running other clients in the session
+  stop                   stop everything and delete $T
+EOF
+}
+
+running() {
+  [[ -f "$T/$1.pid" ]] && kill -0 "$(<"$T/$1.pid")" 2>/dev/null
+}
+
+require_session() {
+  running kwin || die "no session; run: uitest start"
+}
+
+# Environment for clients inside the nested session: nothing leaks to the real desktop.
+session_env() {
+  cat <<EOF
+export HOME='$T/home'
+export XDG_CONFIG_HOME='$T/home/.config' XDG_DATA_HOME='$T/home/.local/share'
+export XDG_STATE_HOME='$T/home/.local/state' XDG_CACHE_HOME='$T/home/.cache'
+export XDG_RUNTIME_DIR='$T/run' DBUS_SESSION_BUS_ADDRESS='unix:path=$T/run/bus'
+export WAYLAND_DISPLAY='$SOCKET' QT_QPA_PLATFORM=wayland XDG_SESSION_TYPE=wayland
+unset DISPLAY WAYLAND_SOCKET
+EOF
+}
+
+# Kill a process group started with setsid, then wait for it to go away.
+stop_group() {
+  local pid
+  running "$1" || return 0
+  pid=$(<"$T/$1.pid")
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for _ in {1..50}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  rm -f "$T/$1.pid"
+}
+
+cmd_start() {
+  local width=${1:-1280} height=${2:-800} paths path python protocols scanner
+  running kwin && die "session already running in $T"
+  command -v kwin_wayland >/dev/null || die "kwin_wayland not found"
+  command -v spectacle >/dev/null || die "spectacle not found"
+  mkdir -p "$T/home" "$T/run" "$T/shots" "$T/proto"
+  chmod 700 "$T/run"
+
+  # Python with pywayland plus the protocol XMLs, from the system nixpkgs registry entry.
+  paths=$(nix build --no-link --print-out-paths --impure --expr '
+    let p = import (builtins.getFlake "nixpkgs") { }; in [
+      (p.python3.withPackages (ps: [ ps.pywayland ]))
+      p.kdePackages.plasma-wayland-protocols
+      p.wayland-scanner.out
+    ]')
+  python='' protocols='' scanner=''
+  for path in $paths; do
+    case "$path" in
+      *-python3-*-env) python=$path ;;
+      *-plasma-wayland-protocols-*) protocols=$path ;;
+      *-wayland-scanner-*) scanner=$path ;;
+    esac
+  done
+  [[ -n "$python" && -n "$protocols" && -n "$scanner" ]] || die "unexpected tool paths: $paths"
+  printf '%s\n' "$python/bin/python" >"$T/python"
+  "$python/bin/python" -m pywayland.scanner \
+    -i "$scanner/share/wayland/wayland.xml" \
+    "$protocols/share/plasma-wayland-protocols/fake-input.xml" \
+    -o "$T/proto" >"$T/scanner.log" 2>&1 ||
+    die "protocol binding generation failed; see $T/scanner.log"
+
+  (
+    eval "$(session_env)"
+    dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" \
+      --fork --print-pid=3 3>"$T/dbus.pid" >/dev/null 2>"$T/dbus.log"
+    # Without this, fake input and screenshots are refused for unregistered clients.
+    KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 setsid kwin_wayland --virtual \
+      --width "$width" --height "$height" --socket "$SOCKET" \
+      --no-lockscreen --no-global-shortcuts --no-kactivities \
+      >"$T/kwin.log" 2>&1 </dev/null &
+    printf '%s\n' "$!" >"$T/kwin.pid"
+  )
+  for _ in {1..100}; do
+    [[ -S "$T/run/$SOCKET" ]] && break
+    running kwin || die "kwin exited; see $T/kwin.log"
+    sleep 0.1
+  done
+  [[ -S "$T/run/$SOCKET" ]] || die "kwin socket did not appear; see $T/kwin.log"
+  printf 'session ready: %sx%s, HOME=%s\n' "$width" "$height" "$T/home"
+}
+
+cmd_app() {
+  require_session
+  stop_group app
+  # devShell keeps the real HOME (flake/git caches); only the app gets the isolated one.
+  nix develop "$ROOT" -c cargo build --quiet --manifest-path "$ROOT/Cargo.toml"
+  (
+    env_file=$(mktemp)
+    session_env >"$env_file"
+    # shellcheck disable=SC2016 # expanded by the inner bash, not here
+    setsid nix develop "$ROOT" -c bash -c '. "$1"; rm -f "$1"; shift; exec "$@"' \
+      _ "$env_file" "$BIN" "$@" >"$T/app.log" 2>&1 </dev/null &
+    printf '%s\n' "$!" >"$T/app.pid"
+  )
+  # Give the window time to map before the caller starts injecting input.
+  sleep "${UITEST_APP_SETTLE:-2}"
+  running app || die "app exited; see: uitest log"
+}
+
+cmd_shot() {
+  require_session
+  local file=${1:-}
+  if [[ -z "$file" ]]; then
+    file=$T/shots/$(date +%H%M%S-%N).png
+  fi
+  (
+    eval "$(session_env)"
+    spectacle --fullscreen --background --nonotify --output "$file" >/dev/null 2>&1
+  )
+  [[ -s "$file" ]] || die "screenshot failed"
+  printf '%s\n' "$file"
+}
+
+cmd_input() {
+  require_session
+  [[ $# -gt 0 ]] || die "input needs a command"
+  (
+    eval "$(session_env)"
+    "$(<"$T/python")" "$SCRIPTS/inject.py" "$T/proto" "$@"
+  )
+}
+
+cmd_stop() {
+  stop_group app
+  stop_group kwin
+  if [[ -f "$T/dbus.pid" ]]; then
+    kill -TERM "$(<"$T/dbus.pid")" 2>/dev/null || true
+  fi
+  rm -rf -- "$T"
+}
+
+main() {
+  [[ $# -gt 0 ]] || {
+    usage
+    exit 1
+  }
+  local cmd=$1
+  shift
+  case "$cmd" in
+    start) cmd_start "$@" ;;
+    app) cmd_app "$@" ;;
+    shot) cmd_shot "$@" ;;
+    input) cmd_input "$@" ;;
+    log) cat -- "$T/app.log" ;;
+    home) printf '%s\n' "$T/home" ;;
+    env) session_env ;;
+    stop) cmd_stop ;;
+    -h | --help | help) usage ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
