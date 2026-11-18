@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::ExitCode};
 
 use directories::UserDirs;
 
+mod cursor;
 mod listing;
 mod logging;
 mod ui;
