@@ -3,7 +3,7 @@ mod dir_column;
 mod scrollbar;
 mod theme;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 
 use crate::listing::Listing;
@@ -15,6 +15,10 @@ pub fn run(left: Listing, right: Listing) {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Music Syncer".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             |_, cx| cx.new(|cx| Browser::new(left, right, cx)),
