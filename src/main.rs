@@ -1,47 +1,39 @@
-use gpui::{
-    App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
-};
-use gpui_platform::application;
+use std::{path::PathBuf, process::ExitCode};
 
+use directories::UserDirs;
+
+mod listing;
 mod logging;
+mod ui;
 
-struct HelloWorld {
-    text: SharedString,
-}
+use listing::Listing;
 
-impl Render for HelloWorld {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .size_full()
-            .justify_center()
-            .items_center()
-            .bg(rgb(0x2e3440))
-            .text_xl()
-            .text_color(rgb(0xeceff4))
-            .child(format!("Hello, {}!", self.text))
-    }
-}
+const USAGE: &str = "usage: music-syncer [LEFT_DIR RIGHT_DIR]";
 
-fn main() {
+fn main() -> ExitCode {
     logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
 
-    application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(500.), px(300.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| {
-                cx.new(|_| HelloWorld {
-                    text: "music-syncer".into(),
-                })
-            },
-        )
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+    let Some((left, right)) = column_paths(std::env::args_os().skip(1).map(PathBuf::from)) else {
+        eprintln!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    tracing::info!(left = %left.display(), right = %right.display(), "listing directories");
+
+    ui::run(Listing::read(left), Listing::read(right));
+    ExitCode::SUCCESS
+}
+
+/// Both paths from the command line, or the XDG music directory and home when none are given.
+fn column_paths(mut args: impl Iterator<Item = PathBuf>) -> Option<(PathBuf, PathBuf)> {
+    match (args.next(), args.next(), args.next()) {
+        (Some(left), Some(right), None) => Some((left, right)),
+        (None, _, _) => {
+            let dirs = UserDirs::new()?;
+            let home = dirs.home_dir().to_path_buf();
+            let music = dirs.audio_dir().map_or_else(|| home.clone(), PathBuf::from);
+            Some((music, home))
+        }
+        _ => None,
+    }
 }
