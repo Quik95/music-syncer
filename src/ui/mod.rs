@@ -1,5 +1,6 @@
 mod browser;
 mod dir_column;
+mod scrollbar;
 mod theme;
 
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
