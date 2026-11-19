@@ -1,4 +1,7 @@
-use std::{ops::Range, path::PathBuf};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
@@ -7,7 +10,9 @@ use gpui::{
 };
 
 use super::{
+    SelectFirst, SelectLast, SelectNext, SelectNextPage, SelectPrevious, SelectPreviousPage,
     folder_picker::{self, Parent},
+    page_rows,
     scrollbar::vertical_scrollbar,
     theme,
     track_preview::{self, COVER_PIXELS, Preview},
@@ -20,19 +25,7 @@ use crate::{
 
 pub const KEY_CONTEXT: &str = "DirColumn";
 
-actions!(
-    dir_column,
-    [
-        SelectPrevious,
-        SelectNext,
-        SelectPreviousPage,
-        SelectNextPage,
-        SelectFirst,
-        SelectLast,
-        OpenSelected,
-        OpenParent,
-    ]
-);
+actions!(dir_column, [OpenSelected, OpenParent]);
 
 /// Path header above a scrollable list of the directory's entries, with one active entry.
 /// An active audio file gets a cover and metadata panel below the list.
@@ -213,17 +206,12 @@ impl DirColumn {
         cx.notify();
     }
 
-    /// Rows fully visible in the viewport during the last layout, at least one.
+    pub fn path(&self) -> &Path {
+        &self.listing.path
+    }
+
     fn page_rows(&self) -> usize {
-        let len = entry_count(&self.listing);
-        let state = self.scroll.0.borrow();
-        let Some(size) = state.last_item_size.filter(|_| len > 0) else {
-            return 1;
-        };
-        let row_height = size.contents.height / len as f32;
-        let rows = (size.item.height / row_height).floor();
-        // Saturating float-to-int cast; NaN (zero-height rows) becomes 0.
-        (rows as usize).saturating_sub(1).max(1)
+        page_rows(&self.scroll, entry_count(&self.listing))
     }
 
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {

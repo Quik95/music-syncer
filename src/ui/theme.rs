@@ -23,11 +23,18 @@ const SNOW_STORM: Oklch = oklch(0.951, 0.007, 261.); // nord6
 const FROST_TEAL: Oklch = oklch(0.775, 0.062, 217.5); // nord8
 const FROST_BLUE: Oklch = oklch(0.697, 0.059, 249.); // nord9
 const AURORA_RED: Oklch = oklch(0.606, 0.121, 15.); // nord11
+const AURORA_YELLOW: Oklch = oklch(0.855, 0.089, 84.); // nord13
+const AURORA_GREEN: Oklch = oklch(0.768, 0.075, 131.); // nord14
 
 // Lightness steps above the background.
 const RAISED: f32 = 0.055;
 const HIGHLIGHT: f32 = 0.09;
 const OUTLINE: f32 = 0.13;
+
+/// Dark, low-chroma shade of `color` for backgrounds behind normal text.
+const fn tint(color: Oklch, l: f32) -> Oklch {
+    Oklch::new_const(l, 0.045, color.hue)
+}
 
 fn rgba(color: Oklch) -> Rgba {
     let rgb = Srgb::from_color(color);
@@ -62,4 +69,9 @@ colors! {
     SCROLLBAR_TRACK = lighter(POLAR_NIGHT, RAISED);
     SCROLLBAR_THUMB = lighter(POLAR_NIGHT, 0.21);
     SCROLLBAR_THUMB_ACTIVE = lighter(POLAR_NIGHT, 0.30);
+    BUTTON = lighter(POLAR_NIGHT, HIGHLIGHT);
+    BUTTON_HOVER = lighter(POLAR_NIGHT, OUTLINE);
+    DIFFERS = AURORA_YELLOW;
+    ONLY_HERE = tint(AURORA_GREEN, 0.40);
+    MISSING_HERE = tint(AURORA_RED, 0.36);
 }

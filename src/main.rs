@@ -6,6 +6,7 @@ mod cursor;
 mod listing;
 mod logging;
 mod track;
+mod tree_diff;
 mod ui;
 
 use listing::Listing;

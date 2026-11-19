@@ -64,7 +64,7 @@ impl Listing {
 
 /// Directories first, then files; each group in case-insensitive natural order.
 /// Symlinks are classified by their target.
-fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
+pub fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = fs::read_dir(dir)?
         .map(|entry| {
             let entry = entry?;
@@ -81,12 +81,24 @@ fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_cached_key(|entry| (entry.kind, natural_key(&entry.name), entry.name.clone()));
+    entries.sort_by_cached_key(sort_key);
     Ok(entries)
 }
 
+/// Position of an entry in a listing. Entries with equal keys have the same kind and
+/// on-disk name.
+pub type SortKey = (EntryKind, Vec<Chunk>, OsString);
+
+pub fn sort_key(entry: &Entry) -> SortKey {
+    (
+        entry.kind,
+        natural_key(&entry.name),
+        entry.file_name.clone(),
+    )
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Chunk {
+pub enum Chunk {
     /// Digits without leading zeros; numbers sort before text.
     Number {
         len: usize,

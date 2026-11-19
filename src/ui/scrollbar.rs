@@ -8,7 +8,7 @@ use gpui::{
 
 use super::theme;
 
-const WIDTH: Pixels = px(10.);
+pub const WIDTH: Pixels = px(10.);
 const MIN_THUMB_HEIGHT: Pixels = px(24.);
 
 /// Vertical scrollbar driving `handle`. Fills the height it is laid out with; renders an empty
