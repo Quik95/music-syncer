@@ -4,7 +4,7 @@ use gpui::{AnyElement, ObjectFit, RenderImage, div, img, prelude::*, px};
 use image::{Frame, RgbaImage};
 
 use super::theme;
-use crate::track::Track;
+use crate::track::{Position, Track};
 
 /// Cover edge in logical pixels; decoded at twice that for HiDPI screens.
 const COVER_SIZE: f32 = 128.;
@@ -20,10 +20,12 @@ pub enum Preview {
 }
 
 impl Preview {
-    /// Moves the decoded cover into a GPU-ready image.
-    pub fn loaded(mut track: Box<Track>) -> Self {
-        let cover = track.cover.take().map(render_image);
-        Self::Loaded { track, cover }
+    /// Turns the decoded cover into a GPU-ready image.
+    pub fn loaded(track: Box<Track>, cover: Option<RgbaImage>) -> Self {
+        Self::Loaded {
+            track,
+            cover: cover.map(render_image),
+        }
     }
 
     /// The image to release from the sprite atlas once this preview is gone.
@@ -129,15 +131,15 @@ fn album_line(track: &Track) -> Option<String> {
 
 /// "Track 3/12 · Disc 1/2 · Genre".
 fn position_line(track: &Track) -> Option<String> {
-    let numbered = |label: &str, number: Option<u32>, total: Option<u32>| {
-        number.map(|number| match total {
+    let numbered = |label: &str, position: Option<Position>| {
+        position.map(|Position { number, total }| match total {
             Some(total) => format!("{label} {number}/{total}"),
             None => format!("{label} {number}"),
         })
     };
     let parts = [
-        numbered("Track", track.track, track.track_total),
-        numbered("Disc", track.disc, track.disc_total),
+        numbered("Track", track.track),
+        numbered("Disc", track.disc),
         track.genre.clone(),
     ];
     let parts = parts.into_iter().flatten().collect::<Vec<_>>();

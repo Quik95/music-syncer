@@ -104,7 +104,7 @@ impl DirColumn {
                     .spawn(async move { track::read(&read_path, COVER_PIXELS) })
                     .await;
                 let content = match result {
-                    Ok(track) => Preview::loaded(Box::new(track)),
+                    Ok((track, cover)) => Preview::loaded(Box::new(track), cover),
                     Err(error) => {
                         tracing::warn!(path = %path.display(), error = format!("{error:#}"), "cannot read track");
                         Preview::Failed(format!("Cannot read metadata: {error:#}"))

@@ -46,7 +46,6 @@ pub struct TreeCompare {
     state: State,
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
-    only_differences: bool,
     copy: Option<Copy>,
     /// Outcome of the last copy, shown in the status bar.
     notice: Option<SharedString>,
@@ -56,10 +55,12 @@ pub struct TreeCompare {
 
 enum State {
     /// The progress bar is `visible` only once the comparison takes longer than
-    /// [`PROGRESS_DELAY`], so quick ones do not flash it.
+    /// [`PROGRESS_DELAY`], so quick ones do not flash it. `only_differences` is the
+    /// filter to apply once the outline exists, which then owns it.
     Comparing {
         progress: Arc<Progress>,
         visible: bool,
+        only_differences: bool,
     },
     Ready(Box<Comparison>),
 }
@@ -143,10 +144,10 @@ impl TreeCompare {
             state: State::Comparing {
                 progress,
                 visible: false,
+                only_differences: false,
             },
             _compare: compare,
             _show_progress: show_progress,
-            only_differences: false,
             copy: None,
             notice: None,
             scroll: UniformListScrollHandle::new(),
@@ -161,7 +162,7 @@ impl TreeCompare {
             "trees compared"
         );
         _ = this.update(cx, |this, cx| {
-            let outline = Outline::new(&diff, this.only_differences);
+            let outline = Outline::new(&diff, this.only_differences());
             let cursor = Cursor::new(outline.rows().len());
             this.state = State::Ready(Box::new(Comparison {
                 summary: summary(&diff),
@@ -174,21 +175,30 @@ impl TreeCompare {
     }
 
     pub fn only_differences(&self) -> bool {
-        self.only_differences
+        match &self.state {
+            State::Comparing {
+                only_differences, ..
+            } => *only_differences,
+            State::Ready(comparison) => comparison.outline.only_differences(),
+        }
     }
 
     /// Shows only entries missing on a side and directories containing such entries.
     /// The active entry stays active, or the nearest visible one above it when hidden.
     pub fn set_only_differences(&mut self, only_differences: bool, cx: &mut Context<Self>) {
-        self.only_differences = only_differences;
         let active = self.active_node();
-        let Some(comparison) = self.comparison() else {
-            return;
-        };
-        comparison
-            .outline
-            .set_only_differences(&comparison.diff, only_differences);
-        self.keep_active(active);
+        match &mut self.state {
+            State::Comparing {
+                only_differences: pending,
+                ..
+            } => *pending = only_differences,
+            State::Ready(comparison) => {
+                comparison
+                    .outline
+                    .set_only_differences(&comparison.diff, only_differences);
+                self.keep_active(active);
+            }
+        }
         cx.notify();
     }
 
@@ -385,7 +395,7 @@ impl TreeCompare {
         let Some(comparison) = self.browsable() else {
             return;
         };
-        if comparison.outline.is_expanded(node) && comparison.diff.nodes[node].has_children(node) {
+        if comparison.outline.is_expanded(node) && comparison.diff.has_children(node) {
             comparison
                 .outline
                 .set_expanded(&comparison.diff, node, false);
@@ -403,7 +413,7 @@ impl TreeCompare {
         let Some(comparison) = self.browsable() else {
             return;
         };
-        if !comparison.diff.nodes[node].has_children(node) {
+        if !comparison.diff.has_children(node) {
             return;
         }
         if comparison.outline.is_expanded(node) {
@@ -430,7 +440,7 @@ impl TreeCompare {
         let Some(comparison) = self.browsable() else {
             return;
         };
-        if comparison.diff.nodes[node].has_children(node) {
+        if comparison.diff.has_children(node) {
             let expanded = comparison.outline.is_expanded(node);
             comparison
                 .outline
@@ -451,7 +461,9 @@ impl TreeCompare {
 
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
         let comparison = match &self.state {
-            State::Comparing { progress, visible } => {
+            State::Comparing {
+                progress, visible, ..
+            } => {
                 return if *visible {
                     centered_progress(
                         progress.fraction(),
@@ -487,7 +499,7 @@ impl TreeCompare {
                     .map(|(offset, &index)| {
                         let row = first + offset;
                         let node = &comparison.diff.nodes[index];
-                        let disclosure = node.has_children(index).then(|| {
+                        let disclosure = comparison.diff.has_children(index).then(|| {
                             if comparison.outline.is_expanded(index) {
                                 "▾"
                             } else {

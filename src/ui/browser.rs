@@ -23,8 +23,13 @@ actions!(
 pub struct Browser {
     left: Entity<DirColumn>,
     right: Entity<DirColumn>,
-    compare: Option<Entity<TreeCompare>>,
-    _compare_changes: Option<Subscription>,
+    compare: Option<OpenComparison>,
+}
+
+struct OpenComparison {
+    view: Entity<TreeCompare>,
+    /// Re-renders the toolbar, which shows the comparison's available actions.
+    _changes: Subscription,
 }
 
 impl Browser {
@@ -36,7 +41,6 @@ impl Browser {
             left,
             right,
             compare: None,
-            _compare_changes: None,
         }
     }
 
@@ -50,16 +54,16 @@ impl Browser {
     /// Compares the trees under the directories the columns show, or goes back to them.
     fn toggle_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compare.take().is_some() {
-            self._compare_changes = None;
             window.focus(&self.left.focus_handle(cx), cx);
         } else {
             let left = self.left.read(cx).path().clone();
             let right = self.right.read(cx).path().clone();
-            let compare = cx.new(|cx| TreeCompare::new(left, right, cx));
-            window.focus(&compare.focus_handle(cx), cx);
-            // The toolbar shows which comparison actions are available.
-            self._compare_changes = Some(cx.observe(&compare, |_, _, cx| cx.notify()));
-            self.compare = Some(compare);
+            let view = cx.new(|cx| TreeCompare::new(left, right, cx));
+            window.focus(&view.focus_handle(cx), cx);
+            self.compare = Some(OpenComparison {
+                _changes: cx.observe(&view, |_, _, cx| cx.notify()),
+                view,
+            });
         }
         cx.notify();
     }
@@ -73,7 +77,7 @@ impl Browser {
         let compare_buttons = self
             .compare
             .as_ref()
-            .map(|compare| Self::compare_buttons(compare, cx))
+            .map(|compare| Self::compare_buttons(&compare.view, cx))
             .unwrap_or_default();
         div()
             .flex()
@@ -147,7 +151,7 @@ impl Browser {
 impl Render for Browser {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.compare {
-            Some(compare) => div().flex_1().min_h_0().child(compare.clone()),
+            Some(compare) => div().flex_1().min_h_0().child(compare.view.clone()),
             None => div()
                 .flex()
                 .flex_1()

@@ -75,12 +75,6 @@ pub struct Node {
     pub differs: bool,
 }
 
-impl Node {
-    pub fn has_children(&self, index: usize) -> bool {
-        self.end > index + 1
-    }
-}
-
 #[derive(Debug)]
 pub struct ReadError {
     pub path: Location,
@@ -162,6 +156,10 @@ impl TreeDiff {
             nodes: builder.nodes,
             errors: builder.errors,
         }
+    }
+
+    pub fn has_children(&self, node: usize) -> bool {
+        self.nodes[node].end > node + 1
     }
 
     pub fn root(&self, side: Side) -> &Location {
@@ -372,6 +370,10 @@ impl Outline {
         };
         outline.refresh(diff);
         outline
+    }
+
+    pub fn only_differences(&self) -> bool {
+        self.only_differences
     }
 
     /// Hides entries, with everything below them, that exist on both sides with equal
@@ -601,7 +603,7 @@ mod tests {
         assert_eq!(diff.errors.len(), 1);
         assert_eq!(diff.errors[0].path, Location::Local(left.join("Same/loop")));
         let looped = diff.nodes.iter().position(|node| node.name == "loop");
-        assert!(looped.is_some_and(|index| !diff.nodes[index].has_children(index)));
+        assert!(looped.is_some_and(|index| !diff.has_children(index)));
         Ok(())
     }
 }

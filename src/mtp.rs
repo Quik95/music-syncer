@@ -41,7 +41,6 @@ trait Device {
 }
 
 /// `(item id, parent id, storage id, name, size, modification time, MIME type)`.
-/// Item id 0 means no such file.
 type MtpFile = (u32, u32, u32, String, u64, i64, String);
 
 #[zbus::proxy(
@@ -54,6 +53,7 @@ trait Storage {
     #[zbus(name = "getFilesAndFolders")]
     fn get_files_and_folders(&self, path: &str) -> zbus::Result<(Vec<MtpFile>, i32)>;
 
+    /// Item id 0 means no such file; use [`file_metadata`].
     #[zbus(name = "getFileMetadata")]
     fn get_file_metadata(&self, path: &str) -> zbus::Result<MtpFile>;
 
@@ -133,7 +133,7 @@ pub fn send_file(source: &File, target: &MtpPath) -> anyhow::Result<()> {
     let storage = storage(target)?;
     let target_path = target.storage_path();
     ensure!(
-        storage.get_file_metadata(&target_path)?.0 == 0,
+        file_metadata(&storage, &target_path)?.is_none(),
         "already exists on the phone"
     );
     // Subscribed before starting so the signal cannot be missed.
@@ -151,6 +151,12 @@ pub fn receive_file(source: &MtpPath, target: &File) -> anyhow::Result<()> {
         storage.get_file_to_file_descriptor(Fd::from(target.as_fd()), &source.storage_path())?;
     ensure!(status == 0, "kmtpd refused the download (status {status})");
     wait(finished)
+}
+
+/// The file or folder at `path`, `None` when there is none.
+fn file_metadata(storage: &StorageProxy<'_>, path: &str) -> zbus::Result<Option<MtpFile>> {
+    let file = storage.get_file_metadata(path)?;
+    Ok((file.0 != 0).then_some(file))
 }
 
 pub fn free_space(path: &MtpPath) -> anyhow::Result<u64> {
