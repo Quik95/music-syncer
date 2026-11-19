@@ -3,7 +3,7 @@ use std::{ops::Range, path::PathBuf};
 use gpui::{
     AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
     ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
-    rgb, uniform_list,
+    uniform_list,
 };
 
 use super::{
@@ -239,9 +239,9 @@ impl DirColumn {
                         };
                         let active = this.cursor.index();
                         let active_bg = if this.focus_handle.is_focused(window) {
-                            theme::ROW_ACTIVE
+                            *theme::ROW_ACTIVE
                         } else {
-                            theme::ROW_ACTIVE_UNFOCUSED
+                            *theme::ROW_ACTIVE_UNFOCUSED
                         };
                         let first = range.start;
                         entries[range]
@@ -260,13 +260,13 @@ impl DirColumn {
                                     },
                                 ));
                                 let row = if active == Some(index) {
-                                    row.bg(rgb(active_bg))
+                                    row.bg(active_bg)
                                 } else {
-                                    row.hover(|style| style.bg(rgb(theme::ROW_HOVER)))
+                                    row.hover(|style| style.bg(*theme::ROW_HOVER))
                                 };
                                 match entry.kind {
                                     EntryKind::Directory => row
-                                        .text_color(rgb(theme::DIRECTORY))
+                                        .text_color(*theme::DIRECTORY)
                                         .child(format!("{}/", entry.name)),
                                     EntryKind::File => row.child(entry.name.clone()),
                                 }
@@ -289,7 +289,7 @@ impl DirColumn {
             }
             Err(error) => div()
                 .px_2()
-                .text_color(rgb(theme::ERROR))
+                .text_color(*theme::ERROR)
                 .child(format!("Cannot read directory: {error}"))
                 .into_any_element(),
         }
@@ -321,9 +321,9 @@ impl Focusable for DirColumn {
 impl Render for DirColumn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header_border = if self.focus_handle.is_focused(window) {
-            theme::FOCUS
+            *theme::FOCUS
         } else {
-            theme::BORDER
+            *theme::BORDER
         };
         div()
             .key_context(KEY_CONTEXT)
@@ -373,13 +373,13 @@ impl Render for DirColumn {
                         this.choose_directory(window, cx);
                     }))
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(theme::HEADER_HOVER)))
+                    .hover(|style| style.bg(*theme::HEADER_HOVER))
                     .flex_none()
                     .px_2()
                     .py_1()
-                    .bg(rgb(theme::HEADER_BACKGROUND))
+                    .bg(*theme::HEADER_BACKGROUND)
                     .border_b_1()
-                    .border_color(rgb(header_border))
+                    .border_color(header_border)
                     .truncate()
                     .child(self.title.clone()),
             )

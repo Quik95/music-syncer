@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc};
 use gpui::{
     App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollEvent, ScrollHandle, Style, Window, fill, point, px, rgb, size,
+    MouseUpEvent, Pixels, ScrollEvent, ScrollHandle, Style, Window, fill, point, px, size,
 };
 
 use super::theme;
@@ -135,18 +135,18 @@ impl Element for VerticalScrollbar {
             (grab.clone(), grab)
         });
 
-        window.paint_quad(fill(bounds, rgb(theme::SCROLLBAR_TRACK)));
+        window.paint_quad(fill(bounds, *theme::SCROLLBAR_TRACK));
         let Some(geometry) = Geometry::new(bounds, &self.handle) else {
             grab.set(None);
             return;
         };
         let hovered = hitbox.is_hovered(window);
         let thumb_color = if hovered || grab.get().is_some() {
-            theme::SCROLLBAR_THUMB_ACTIVE
+            *theme::SCROLLBAR_THUMB_ACTIVE
         } else {
-            theme::SCROLLBAR_THUMB
+            *theme::SCROLLBAR_THUMB
         };
-        window.paint_quad(fill(geometry.thumb, rgb(thumb_color)).corner_radii(WIDTH / 2.));
+        window.paint_quad(fill(geometry.thumb, thumb_color).corner_radii(WIDTH / 2.));
 
         window.on_mouse_event({
             let (handle, grab, hitbox) = (self.handle.clone(), grab.clone(), hitbox.clone());

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use gpui::{AnyElement, ObjectFit, RenderImage, div, img, prelude::*, px, rgb};
+use gpui::{AnyElement, ObjectFit, RenderImage, div, img, prelude::*, px};
 use image::{Frame, RgbaImage};
 
 use super::theme;
@@ -49,8 +49,8 @@ pub fn render(preview: &Preview) -> AnyElement {
         .gap_3()
         .p_2()
         .border_t_1()
-        .border_color(rgb(theme::BORDER))
-        .bg(rgb(theme::HEADER_BACKGROUND));
+        .border_color(*theme::BORDER)
+        .bg(*theme::HEADER_BACKGROUND);
     match preview {
         Preview::Loaded { track, cover } => {
             let frame = div()
@@ -59,14 +59,14 @@ pub fn render(preview: &Preview) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgb(theme::BACKGROUND));
+                .bg(*theme::BACKGROUND);
             let frame = match cover {
                 Some(image) => frame.child(
                     img(image.clone())
                         .size_full()
                         .object_fit(ObjectFit::Contain),
                 ),
-                None => frame.text_color(rgb(theme::TEXT_MUTED)).child("No cover"),
+                None => frame.text_color(*theme::TEXT_MUTED).child("No cover"),
             };
             panel.child(frame).child(details(track)).into_any_element()
         }
@@ -75,7 +75,7 @@ pub fn render(preview: &Preview) -> AnyElement {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_color(rgb(theme::ERROR))
+                    .text_color(*theme::ERROR)
                     .child(error.clone()),
             )
             .into_any_element(),
@@ -84,7 +84,7 @@ pub fn render(preview: &Preview) -> AnyElement {
 
 fn details(track: &Track) -> impl IntoElement {
     let line = |text: String| div().truncate().child(text);
-    let muted = |text: String| line(text).text_color(rgb(theme::TEXT_MUTED));
+    let muted = |text: String| line(text).text_color(*theme::TEXT_MUTED);
     let mut column = div().flex().flex_col().min_w_0().flex_1().child(
         line(
             track

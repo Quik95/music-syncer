@@ -1,6 +1,4 @@
-use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, Window, actions, div, prelude::*, rgb,
-};
+use gpui::{AppContext as _, Context, Entity, Focusable as _, Window, actions, div, prelude::*};
 
 use super::{dir_column::DirColumn, theme};
 use crate::listing::Listing;
@@ -51,14 +49,14 @@ impl Render for Browser {
             }))
             .flex()
             .size_full()
-            .bg(rgb(theme::BACKGROUND))
-            .text_color(rgb(theme::TEXT))
+            .bg(*theme::BACKGROUND)
+            .text_color(*theme::TEXT)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .border_r_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(*theme::BORDER)
                     .child(self.left.clone()),
             )
             .child(div().flex_1().min_w_0().child(self.right.clone()))
