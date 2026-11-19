@@ -1,5 +1,6 @@
 mod browser;
 mod dir_column;
+mod folder_picker;
 mod scrollbar;
 mod theme;
 mod track_preview;

@@ -56,6 +56,20 @@ $U stop                           # kills everything and deletes the sandbox
   to set keyboard focus.
 - Copy screenshots out of the sandbox before `stop` if they need to survive.
 
+## Desktop portals (file chooser)
+
+The session's private D-Bus has no portals. Start them inside it before using a
+feature that goes through `xdg-desktop-portal`; they exit with `uitest stop`:
+
+```sh
+(eval "$($U env)"; export XDG_CURRENT_DESKTOP=KDE
+ setsid /run/current-system/sw/libexec/xdg-desktop-portal-kde </dev/null &>/dev/null &
+ setsid /run/current-system/sw/libexec/xdg-desktop-portal -r </dev/null &>/dev/null &)
+```
+
+KDE's Qt dialogs ignore fake pointer clicks (hover works), so drive them with keys:
+`alt+up` parent folder, arrows + `enter` to enter a folder, `alt+o` Open, `esc` Cancel.
+
 ## Input reference
 
 | Command | Effect |

@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use super::{
+    folder_picker::{self, Parent},
     scrollbar::vertical_scrollbar,
     theme,
     track_preview::{self, COVER_PIXELS, Preview},
@@ -169,6 +170,28 @@ impl DirColumn {
             cursor.select(index, len);
         }
         self.show(listing, cursor, ScrollStrategy::Center, cx);
+    }
+
+    /// Lets the user choose the directory in the desktop's native dialog.
+    fn choose_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let parent = Parent::of(window);
+        let start = self.listing.path.clone();
+        cx.spawn(async move |this, cx| {
+            let path = match folder_picker::pick_directory(parent, &start).await {
+                Ok(Some(path)) => path,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(error = format!("{error:#}"), "cannot choose directory");
+                    return;
+                }
+            };
+            _ = this.update(cx, |this, cx| {
+                let listing = Listing::read(path);
+                let first = Cursor::new(entry_count(&listing));
+                this.show(listing, first, ScrollStrategy::Top, cx);
+            });
+        })
+        .detach();
     }
 
     fn show(
@@ -345,6 +368,12 @@ impl Render for DirColumn {
             .size_full()
             .child(
                 div()
+                    .id("location")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.choose_directory(window, cx);
+                    }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::HEADER_HOVER)))
                     .flex_none()
                     .px_2()
                     .py_1()

@@ -214,6 +214,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "getrandom 0.4.3",
+ "raw-window-handle",
  "serde",
  "serde_repr",
  "wayland-backend",
@@ -2843,15 +2844,18 @@ name = "music-syncer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "directories",
  "gpui",
  "gpui_platform",
  "image",
  "jiff",
  "lofty",
+ "raw-window-handle",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

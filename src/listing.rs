@@ -26,9 +26,13 @@ pub struct Listing {
 }
 
 impl Listing {
-    /// Relative paths are made absolute against the current directory; symlinks stay unresolved.
+    /// Relative paths are made absolute against the current directory and trailing slashes
+    /// are dropped; symlinks stay unresolved.
     pub fn read(path: PathBuf) -> Self {
-        let path = std::path::absolute(&path).unwrap_or(path);
+        let path: PathBuf = std::path::absolute(&path)
+            .unwrap_or(path)
+            .components()
+            .collect();
         let entries = read_entries(&path);
         if let Err(error) = &entries {
             tracing::warn!(path = %path.display(), %error, "cannot list directory");

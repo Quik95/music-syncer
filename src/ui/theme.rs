@@ -2,6 +2,7 @@
 
 pub const BACKGROUND: u32 = 0x2e3440;
 pub const HEADER_BACKGROUND: u32 = 0x3b4252;
+pub const HEADER_HOVER: u32 = 0x434c5e;
 pub const BORDER: u32 = 0x4c566a;
 pub const TEXT: u32 = 0xeceff4;
 pub const TEXT_MUTED: u32 = 0x81a1c1;
