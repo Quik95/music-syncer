@@ -2,6 +2,7 @@ mod browser;
 mod dir_column;
 mod scrollbar;
 mod theme;
+mod track_preview;
 
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px,

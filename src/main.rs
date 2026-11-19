@@ -5,6 +5,7 @@ use directories::UserDirs;
 mod cursor;
 mod listing;
 mod logging;
+mod track;
 mod ui;
 
 use listing::Listing;

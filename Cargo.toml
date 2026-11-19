@@ -20,7 +20,9 @@ anyhow = "1.0.104"
 directories = "6.0.0"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", features = ["font-kit", "wayland"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 jiff = { version = "0.2.42", default-features = false, features = ["std"] }
+lofty = "0.25.5"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

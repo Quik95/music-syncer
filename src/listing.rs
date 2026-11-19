@@ -42,6 +42,12 @@ impl Listing {
         (entry.kind == EntryKind::Directory).then(|| self.path.join(&entry.file_name))
     }
 
+    /// Path of the entry at `index` if it is a file.
+    pub fn file(&self, index: usize) -> Option<PathBuf> {
+        let entry = self.entries.as_ref().ok()?.get(index)?;
+        (entry.kind == EntryKind::File).then(|| self.path.join(&entry.file_name))
+    }
+
     /// Index of the entry with exactly this on-disk name.
     pub fn position(&self, file_name: &OsStr) -> Option<usize> {
         self.entries

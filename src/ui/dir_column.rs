@@ -1,15 +1,20 @@
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
-    ScrollStrategy, SharedString, UniformListScrollHandle, Window, actions, div, prelude::*, rgb,
-    uniform_list,
+    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
+    rgb, uniform_list,
 };
 
-use super::{scrollbar::vertical_scrollbar, theme};
+use super::{
+    scrollbar::vertical_scrollbar,
+    theme,
+    track_preview::{self, COVER_PIXELS, Preview},
+};
 use crate::{
     cursor::{Cursor, Move},
     listing::{EntryKind, Listing},
+    track,
 };
 
 pub const KEY_CONTEXT: &str = "DirColumn";
@@ -29,30 +34,44 @@ actions!(
 );
 
 /// Path header above a scrollable list of the directory's entries, with one active entry.
+/// An active audio file gets a cover and metadata panel below the list.
 pub struct DirColumn {
     listing: Listing,
     title: SharedString,
     scroll: UniformListScrollHandle,
     cursor: Cursor,
     focus_handle: FocusHandle,
+    preview: Option<ActivePreview>,
+}
+
+/// Preview of the active audio file. While a newly activated file is being read, the
+/// previous file's content stays visible to avoid flicker when moving through a list.
+struct ActivePreview {
+    path: PathBuf,
+    content: Option<Preview>,
+    _load: Task<()>,
 }
 
 impl DirColumn {
     pub fn new(listing: Listing, cx: &mut Context<Self>) -> Self {
         let title = title(&listing);
         let cursor = Cursor::new(entry_count(&listing));
-        Self {
+        let mut column = Self {
             listing,
             title,
             scroll: UniformListScrollHandle::new(),
             cursor,
             focus_handle: cx.focus_handle(),
-        }
+            preview: None,
+        };
+        column.update_preview(cx);
+        column
     }
 
     fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.cursor.select(index, entry_count(&self.listing));
         window.focus(&self.focus_handle, cx);
+        self.update_preview(cx);
         cx.notify();
     }
 
@@ -61,7 +80,62 @@ impl DirColumn {
         if let Some(index) = self.cursor.index() {
             self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
         }
+        self.update_preview(cx);
         cx.notify();
+    }
+
+    /// Starts reading the active entry's metadata if it is an audio file not yet previewed.
+    fn update_preview(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .cursor
+            .index()
+            .and_then(|index| self.listing.file(index))
+            .filter(|path| track::is_audio(path));
+
+        if self.preview.as_ref().map(|preview| &preview.path) == path.as_ref() {
+            return;
+        }
+
+        let Some(path) = path else {
+            if let Some(content) = self.preview.take().and_then(|preview| preview.content) {
+                release(content, cx);
+            }
+            return;
+        };
+
+        let load = cx.spawn({
+            let path = path.clone();
+            async move |this, cx| {
+                let read_path = path.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { track::read(&read_path, COVER_PIXELS) })
+                    .await;
+                let content = match result {
+                    Ok(track) => Preview::loaded(Box::new(track)),
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), error = format!("{error:#}"), "cannot read track");
+                        Preview::Failed(format!("Cannot read metadata: {error:#}"))
+                    }
+                };
+                _ = this.update(cx, |this, cx| {
+                    let Some(preview) = this.preview.as_mut().filter(|p| p.path == path) else {
+                        return;
+                    };
+                    if let Some(old) = preview.content.replace(content) {
+                        release(old, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        });
+
+        let content = self.preview.take().and_then(|preview| preview.content);
+        self.preview = Some(ActivePreview {
+            path,
+            content,
+            _load: load,
+        });
     }
 
     /// Enters the active entry if it is a directory; files are ignored for now.
@@ -111,6 +185,8 @@ impl DirColumn {
         if let Some(index) = cursor.index() {
             self.scroll.scroll_to_item(index, strategy);
         }
+
+        self.update_preview(cx);
         cx.notify();
     }
 
@@ -205,6 +281,14 @@ fn entry_count(listing: &Listing) -> usize {
     listing.entries.as_ref().map_or(0, Vec::len)
 }
 
+/// Frees the preview's cover from the sprite atlas. Deferred because the window being
+/// updated is detached from the app until the update ends, so it would be skipped.
+fn release(mut preview: Preview, cx: &mut App) {
+    if let Some(cover) = preview.take_cover() {
+        cx.defer(move |cx| cx.drop_image(cover, None));
+    }
+}
+
 impl Focusable for DirColumn {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -271,5 +355,11 @@ impl Render for DirColumn {
                     .child(self.title.clone()),
             )
             .child(div().flex_1().min_h_0().child(self.body(cx)))
+            .children(
+                self.preview
+                    .as_ref()
+                    .and_then(|preview| preview.content.as_ref())
+                    .map(track_preview::render),
+            )
     }
 }
