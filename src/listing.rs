@@ -58,7 +58,7 @@ impl Listing {
     }
 }
 
-/// Directories first, then files; each group by case-insensitive name.
+/// Directories first, then files; each group in case-insensitive natural order.
 /// Symlinks are classified by their target.
 fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = fs::read_dir(dir)?
@@ -77,8 +77,43 @@ fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_cached_key(|entry| (entry.kind, entry.name.to_lowercase(), entry.name.clone()));
+    entries.sort_by_cached_key(|entry| (entry.kind, natural_key(&entry.name), entry.name.clone()));
     Ok(entries)
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Chunk {
+    /// Digits without leading zeros; numbers sort before text.
+    Number {
+        len: usize,
+        digits: String,
+    },
+    Text(String),
+}
+
+/// Case-insensitive key that orders runs of ASCII digits by numeric value of any size,
+/// so "3. Kids" sorts before "12. DARE".
+fn natural_key(name: &str) -> Vec<Chunk> {
+    let mut chunks = Vec::new();
+    let mut rest = name;
+    while let Some(first) = rest.chars().next() {
+        let is_digit = first.is_ascii_digit();
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != is_digit)
+            .unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(end);
+        chunks.push(if is_digit {
+            let digits = run.trim_start_matches('0');
+            Chunk::Number {
+                len: digits.len(),
+                digits: digits.to_owned(),
+            }
+        } else {
+            Chunk::Text(run.to_lowercase())
+        });
+        rest = tail;
+    }
+    chunks
 }
 
 #[cfg(test)]
@@ -113,6 +148,36 @@ mod tests {
         expected.insert(1, (EntryKind::Directory, "link-to-dir".to_owned()));
         assert_eq!(names, expected);
         Ok(())
+    }
+
+    #[test]
+    fn digit_runs_sort_by_numeric_value() {
+        let mut names = [
+            "12. DARE.mp3",
+            "track2b",
+            "3. Kids With Guns.mp3",
+            "track2a",
+            "100000000000000000000000.mp3",
+            "track10",
+            "007.mp3",
+            "99999999999999999999999.mp3",
+            "track",
+        ];
+        names.sort_by_cached_key(|name| natural_key(name));
+        assert_eq!(
+            names,
+            [
+                "3. Kids With Guns.mp3",
+                "007.mp3",
+                "12. DARE.mp3",
+                "99999999999999999999999.mp3",
+                "100000000000000000000000.mp3",
+                "track",
+                "track2a",
+                "track2b",
+                "track10",
+            ]
+        );
     }
 
     #[test]
