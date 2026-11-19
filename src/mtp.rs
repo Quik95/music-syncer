@@ -1,9 +1,13 @@
-//! Read access to phones through KDE's `kmtpd`, which owns connected MTP devices while
-//! Plasma runs, so this works alongside Dolphin.
+//! Access to phones through KDE's `kmtpd`, which owns connected MTP devices while Plasma
+//! runs, so this works alongside Dolphin.
 
-use std::{ffi::OsString, io, sync::OnceLock};
+use std::{ffi::OsString, fs::File, io, os::fd::AsFd as _, sync::OnceLock};
 
-use zbus::{blocking::Connection, zvariant::OwnedObjectPath};
+use anyhow::{Context as _, bail, ensure};
+use zbus::{
+    blocking::Connection,
+    zvariant::{Fd, OwnedObjectPath},
+};
 
 use crate::{
     listing::{Entry, EntryKind},
@@ -37,7 +41,8 @@ trait Device {
 }
 
 /// `(item id, parent id, storage id, name, size, modification time, MIME type)`.
-type File = (u32, u32, u32, String, u64, i64, String);
+/// Item id 0 means no such file.
+type MtpFile = (u32, u32, u32, String, u64, i64, String);
 
 #[zbus::proxy(
     interface = "org.kde.kmtp.Storage",
@@ -47,10 +52,43 @@ type File = (u32, u32, u32, String, u64, i64, String);
 trait Storage {
     /// Entries of the directory at `path`, and kmtpd's status (0 on success).
     #[zbus(name = "getFilesAndFolders")]
-    fn get_files_and_folders(&self, path: &str) -> zbus::Result<(Vec<File>, i32)>;
+    fn get_files_and_folders(&self, path: &str) -> zbus::Result<(Vec<MtpFile>, i32)>;
+
+    #[zbus(name = "getFileMetadata")]
+    fn get_file_metadata(&self, path: &str) -> zbus::Result<MtpFile>;
+
+    /// New folder's id; 0 on failure, `u32::MAX` when it already exists and
+    /// `u32::MAX - 1` when a file has its name.
+    #[zbus(name = "createFolder")]
+    fn create_folder(&self, path: &str) -> zbus::Result<u32>;
+
+    /// Starts writing the file at `source_path` into `descriptor`; 0 when started.
+    /// The outcome arrives as `copyFinished`.
+    #[zbus(name = "getFileToFileDescriptor")]
+    fn get_file_to_file_descriptor(
+        &self,
+        descriptor: Fd<'_>,
+        source_path: &str,
+    ) -> zbus::Result<i32>;
+
+    /// Starts reading a new file at `destination_path` from `descriptor`; 0 when started.
+    /// The outcome arrives as `copyFinished`.
+    #[zbus(name = "sendFileFromFileDescriptor")]
+    fn send_file_from_file_descriptor(
+        &self,
+        descriptor: Fd<'_>,
+        destination_path: &str,
+    ) -> zbus::Result<i32>;
+
+    /// libmtp's result of the transfer started last; 0 on success.
+    #[zbus(signal, name = "copyFinished")]
+    fn copy_finished(&self, result: i32) -> zbus::Result<()>;
 
     #[zbus(property, name = "description")]
     fn description(&self) -> zbus::Result<String>;
+
+    #[zbus(property, name = "freeSpaceInBytes")]
+    fn free_space_in_bytes(&self) -> zbus::Result<u64>;
 }
 
 /// Unsorted entries of an MTP directory.
@@ -68,16 +106,66 @@ pub fn read_dir(path: &MtpPath) -> io::Result<Vec<Entry>> {
     }
     Ok(files
         .into_iter()
-        .map(|(.., name, _, _, mime)| Entry {
+        .map(|(.., name, size, _, mime)| Entry {
             kind: if mime == "inode/directory" {
                 EntryKind::Directory
             } else {
-                EntryKind::File
+                EntryKind::File { size }
             },
             file_name: OsString::from(&name),
             name,
         })
         .collect())
+}
+
+/// Creates a directory whose parent exists; an existing directory counts as success.
+pub fn create_dir(path: &MtpPath) -> anyhow::Result<()> {
+    match storage(path)?.create_folder(&path.storage_path())? {
+        0 => bail!("kmtpd cannot create the folder"),
+        u32::MAX => Ok(()),
+        id if id == u32::MAX - 1 => bail!("a file with this name exists"),
+        _ => Ok(()),
+    }
+}
+
+/// Uploads `source` as a new file at `target`, which must not exist yet.
+pub fn send_file(source: &File, target: &MtpPath) -> anyhow::Result<()> {
+    let storage = storage(target)?;
+    let target_path = target.storage_path();
+    ensure!(
+        storage.get_file_metadata(&target_path)?.0 == 0,
+        "already exists on the phone"
+    );
+    // Subscribed before starting so the signal cannot be missed.
+    let finished = storage.receive_copy_finished()?;
+    let status = storage.send_file_from_file_descriptor(Fd::from(source.as_fd()), &target_path)?;
+    ensure!(status == 0, "kmtpd refused the upload (status {status})");
+    wait(finished)
+}
+
+/// Downloads the file at `source` into `target`.
+pub fn receive_file(source: &MtpPath, target: &File) -> anyhow::Result<()> {
+    let storage = storage(source)?;
+    let finished = storage.receive_copy_finished()?;
+    let status =
+        storage.get_file_to_file_descriptor(Fd::from(target.as_fd()), &source.storage_path())?;
+    ensure!(status == 0, "kmtpd refused the download (status {status})");
+    wait(finished)
+}
+
+pub fn free_space(path: &MtpPath) -> anyhow::Result<u64> {
+    Ok(storage(path)?.free_space_in_bytes()?)
+}
+
+/// kmtpd does not tag the signal with the transfer, so one started meanwhile by another
+/// client on the same storage could be taken for ours.
+fn wait(mut finished: copyFinishedIterator) -> anyhow::Result<()> {
+    let signal = finished
+        .next()
+        .context("kmtpd stopped before finishing the transfer")?;
+    let result = signal.args()?.result;
+    ensure!(result == 0, "transfer failed (libmtp result {result})");
+    Ok(())
 }
 
 /// The storage of a connected device, both matched by the names in `mtp:/` URLs.
@@ -94,9 +182,9 @@ fn storage(path: &MtpPath) -> anyhow::Result<StorageProxy<'static>> {
                 return Ok(storage);
             }
         }
-        anyhow::bail!("{} has no storage named {}", path.device, path.storage);
+        bail!("{} has no storage named {}", path.device, path.storage);
     }
-    anyhow::bail!(
+    bail!(
         "{} is not connected ({SERVICE} does not list it)",
         path.device
     )

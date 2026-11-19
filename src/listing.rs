@@ -6,8 +6,28 @@ use std::{
 
 use crate::{location::Location, mtp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
+    Directory,
+    File { size: u64 },
+}
+
+impl EntryKind {
+    pub fn is_dir(self) -> bool {
+        self == Self::Directory
+    }
+
+    fn group(self) -> Group {
+        match self {
+            Self::Directory => Group::Directory,
+            Self::File { .. } => Group::File,
+        }
+    }
+}
+
+/// Kind of an entry without its data, ordered as listings show them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
     Directory,
     File,
 }
@@ -39,14 +59,17 @@ impl Listing {
     /// Location of the entry at `index` if it is a directory.
     pub fn subdirectory(&self, index: usize) -> Option<Location> {
         let entry = self.entries.as_ref().ok()?.get(index)?;
-        (entry.kind == EntryKind::Directory).then(|| self.path.join(&entry.file_name))
+        entry
+            .kind
+            .is_dir()
+            .then(|| self.path.join(&entry.file_name))
     }
 
     /// Path of the entry at `index` if it is a local file.
     pub fn local_file(&self, index: usize) -> Option<PathBuf> {
         let entry = self.entries.as_ref().ok()?.get(index)?;
         let dir = self.path.as_local()?;
-        (entry.kind == EntryKind::File).then(|| dir.join(&entry.file_name))
+        (!entry.kind.is_dir()).then(|| dir.join(&entry.file_name))
     }
 
     /// Index of the entry with exactly this on-disk name.
@@ -74,10 +97,13 @@ fn read_local_entries(dir: &Path) -> io::Result<Vec<Entry>> {
     fs::read_dir(dir)?
         .map(|entry| {
             let entry = entry?;
-            let kind = if entry.path().is_dir() {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
+            // Follows symlinks; a broken one counts as an empty file.
+            let kind = match fs::metadata(entry.path()) {
+                Ok(metadata) if metadata.is_dir() => EntryKind::Directory,
+                Ok(metadata) => EntryKind::File {
+                    size: metadata.len(),
+                },
+                Err(_) => EntryKind::File { size: 0 },
             };
             let file_name = entry.file_name();
             Ok(Entry {
@@ -89,13 +115,13 @@ fn read_local_entries(dir: &Path) -> io::Result<Vec<Entry>> {
         .collect()
 }
 
-/// Position of an entry in a listing. Entries with equal keys have the same kind and
-/// on-disk name.
-pub type SortKey = (EntryKind, Vec<Chunk>, OsString);
+/// Position of an entry in a listing. Entries with equal keys have the same group and
+/// on-disk name; files of different sizes still match.
+pub type SortKey = (Group, Vec<Chunk>, OsString);
 
 pub fn sort_key(entry: &Entry) -> SortKey {
     (
-        entry.kind,
+        entry.kind.group(),
         natural_key(&entry.name),
         entry.file_name.clone(),
     )
@@ -146,7 +172,7 @@ mod tests {
         let root = temp.path();
         fs::create_dir(root.join("b-dir"))?;
         fs::create_dir(root.join("Z-dir"))?;
-        fs::write(root.join("a.flac"), "")?;
+        fs::write(root.join("a.flac"), "abc")?;
         fs::write(root.join("C.mp3"), "")?;
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("b-dir"), root.join("link-to-dir"))?;
@@ -161,8 +187,8 @@ mod tests {
         let mut expected = vec![
             (EntryKind::Directory, "b-dir".to_owned()),
             (EntryKind::Directory, "Z-dir".to_owned()),
-            (EntryKind::File, "a.flac".to_owned()),
-            (EntryKind::File, "C.mp3".to_owned()),
+            (EntryKind::File { size: 3 }, "a.flac".to_owned()),
+            (EntryKind::File { size: 0 }, "C.mp3".to_owned()),
         ];
         #[cfg(unix)]
         expected.insert(1, (EntryKind::Directory, "link-to-dir".to_owned()));

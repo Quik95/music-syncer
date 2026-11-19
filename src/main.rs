@@ -7,6 +7,7 @@ mod listing;
 mod location;
 mod logging;
 mod mtp;
+mod sync;
 mod track;
 mod tree_diff;
 mod ui;

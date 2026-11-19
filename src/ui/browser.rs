@@ -1,10 +1,15 @@
 use gpui::{
     AppContext as _, ClickEvent, Context, Div, Entity, Focusable as _, SharedString, Stateful,
-    Window, actions, div, prelude::*,
+    Subscription, Window, actions, div, prelude::*,
 };
 
-use super::{dir_column::DirColumn, theme, tree_compare::TreeCompare};
-use crate::listing::Listing;
+use super::{
+    dir_column::DirColumn,
+    theme,
+    tree_compare::{CopyScope, TreeCompare},
+    widgets::button,
+};
+use crate::{listing::Listing, tree_diff::Side};
 
 pub const KEY_CONTEXT: &str = "Browser";
 
@@ -19,6 +24,7 @@ pub struct Browser {
     left: Entity<DirColumn>,
     right: Entity<DirColumn>,
     compare: Option<Entity<TreeCompare>>,
+    _compare_changes: Option<Subscription>,
 }
 
 impl Browser {
@@ -30,6 +36,7 @@ impl Browser {
             left,
             right,
             compare: None,
+            _compare_changes: None,
         }
     }
 
@@ -43,12 +50,15 @@ impl Browser {
     /// Compares the trees under the directories the columns show, or goes back to them.
     fn toggle_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compare.take().is_some() {
+            self._compare_changes = None;
             window.focus(&self.left.focus_handle(cx), cx);
         } else {
             let left = self.left.read(cx).path().clone();
             let right = self.right.read(cx).path().clone();
             let compare = cx.new(|cx| TreeCompare::new(left, right, cx));
             window.focus(&compare.focus_handle(cx), cx);
+            // The toolbar shows which comparison actions are available.
+            self._compare_changes = Some(cx.observe(&compare, |_, _, cx| cx.notify()));
             self.compare = Some(compare);
         }
         cx.notify();
@@ -60,16 +70,11 @@ impl Browser {
         } else {
             "Compare trees".into()
         };
-        let filter = self.compare.as_ref().map(|compare| {
-            let on = compare.read(cx).only_differences();
-            let compare = compare.clone();
-            button("only-differences", on)
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    compare.update(cx, |compare, cx| compare.set_only_differences(!on, cx));
-                    cx.notify();
-                }))
-                .child("Only differences")
-        });
+        let compare_buttons = self
+            .compare
+            .as_ref()
+            .map(|compare| Self::compare_buttons(compare, cx))
+            .unwrap_or_default();
         div()
             .flex()
             .flex_none()
@@ -79,30 +84,64 @@ impl Browser {
             .border_b_1()
             .border_color(*theme::BORDER)
             .child(
-                button("compare", false)
+                button("compare", false, true)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_compare(window, cx);
                     }))
                     .child(label),
             )
-            .children(filter)
+            .children(compare_buttons)
     }
-}
 
-/// A toolbar button; a `pressed` one stays highlighted, for toggles that are on.
-fn button(id: &'static str, pressed: bool) -> Stateful<Div> {
-    let background = if pressed {
-        *theme::BUTTON_PRESSED
-    } else {
-        *theme::BUTTON
-    };
-    div()
-        .id(id)
-        .cursor_pointer()
-        .px_2()
-        .rounded_sm()
-        .bg(background)
-        .hover(|style| style.bg(*theme::BUTTON_HOVER))
+    /// The differences filter and the copy actions, each enabled when it has work.
+    fn compare_buttons(
+        compare: &Entity<TreeCompare>,
+        cx: &mut Context<Self>,
+    ) -> Vec<Stateful<Div>> {
+        let view = compare.read(cx);
+        let on = view.only_differences();
+        let filter = button("only-differences", on, true)
+            .on_click(cx.listener({
+                let compare = compare.clone();
+                move |_, _: &ClickEvent, _, cx| {
+                    compare.update(cx, |compare, cx| compare.set_only_differences(!on, cx));
+                }
+            }))
+            .child("Only differences");
+        let actions = [
+            (
+                "copy-active-right",
+                "Copy →",
+                CopyScope::Active,
+                Side::Right,
+            ),
+            ("copy-active-left", "← Copy", CopyScope::Active, Side::Left),
+            (
+                "copy-all-right",
+                "Copy all missing →",
+                CopyScope::All,
+                Side::Right,
+            ),
+            (
+                "copy-all-left",
+                "← Copy all missing",
+                CopyScope::All,
+                Side::Left,
+            ),
+        ];
+        let copies = actions.map(|(id, label, scope, target)| {
+            let enabled = view.can_copy(scope, target);
+            let compare = compare.clone();
+            button(id, false, enabled)
+                .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
+                    compare.update(cx, |compare, cx| {
+                        compare.request_copy(scope, target, window, cx);
+                    });
+                }))
+                .child(label)
+        });
+        std::iter::once(filter).chain(copies).collect()
+    }
 }
 
 impl Render for Browser {

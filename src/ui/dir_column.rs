@@ -254,7 +254,7 @@ impl DirColumn {
                                     EntryKind::Directory => row
                                         .text_color(*theme::DIRECTORY)
                                         .child(format!("{}/", entry.name)),
-                                    EntryKind::File => row.child(entry.name.clone()),
+                                    EntryKind::File { .. } => row.child(entry.name.clone()),
                                 }
                             })
                             .collect()

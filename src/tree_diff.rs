@@ -3,6 +3,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs, io,
     path::PathBuf,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -20,13 +21,39 @@ pub enum Presence {
     RightOnly,
 }
 
-impl Presence {
-    pub fn on_left(self) -> bool {
-        self != Self::RightOnly
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
     }
 
-    pub fn on_right(self) -> bool {
-        self != Self::LeftOnly
+    fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+        }
+    }
+}
+
+impl Presence {
+    pub fn is_on(self, side: Side) -> bool {
+        self == Self::Both || self == Self::only(side)
+    }
+
+    /// Present on `side` and missing on the other.
+    pub fn only(side: Side) -> Self {
+        match side {
+            Side::Left => Self::LeftOnly,
+            Side::Right => Self::RightOnly,
+        }
     }
 }
 
@@ -35,6 +62,9 @@ impl Presence {
 #[derive(Debug)]
 pub struct Node {
     pub name: String,
+    /// Exact name on disk, for building paths.
+    pub file_name: OsString,
+    /// As found on the left side when the entry is on both.
     pub kind: EntryKind,
     pub presence: Presence,
     pub depth: usize,
@@ -61,6 +91,8 @@ pub struct ReadError {
 /// Unreadable directories are compared as empty and reported in `errors`.
 #[derive(Debug)]
 pub struct TreeDiff {
+    /// Compared directories, left then right.
+    roots: [Location; 2],
     pub nodes: Vec<Node>,
     pub errors: Vec<ReadError>,
 }
@@ -126,8 +158,45 @@ impl TreeDiff {
         builder.add_children(&roots, None, 0, &mut ancestors);
         progress.update(&[(1, 1)], builder.nodes.len());
         Self {
+            roots: [left.clone(), right.clone()],
             nodes: builder.nodes,
             errors: builder.errors,
+        }
+    }
+
+    pub fn root(&self, side: Side) -> &Location {
+        &self.roots[side.index()]
+    }
+
+    /// Where `node` is, or would be, on `side`.
+    pub fn location(&self, node: usize, side: Side) -> Location {
+        let mut names = Vec::new();
+        let mut current = Some(node);
+        while let Some(index) = current {
+            names.push(&self.nodes[index].file_name);
+            current = self.nodes[index].parent;
+        }
+        names
+            .into_iter()
+            .rev()
+            .fold(self.roots[side.index()].clone(), |location, name| {
+                location.join(name)
+            })
+    }
+
+    /// Records that `nodes` now exist on both sides and updates which subtrees differ.
+    pub fn mark_on_both(&mut self, nodes: &[usize]) {
+        for &node in nodes {
+            self.nodes[node].presence = Presence::Both;
+        }
+        // Children come after their parent, so a reverse pass sees every child first.
+        let mut child_differs = vec![false; self.nodes.len()];
+        for index in (0..self.nodes.len()).rev() {
+            let node = &mut self.nodes[index];
+            node.differs = node.presence != Presence::Both || child_differs[index];
+            if let Some(parent) = node.parent {
+                child_differs[parent] |= node.differs;
+            }
         }
     }
 
@@ -195,6 +264,7 @@ impl Builder<'_> {
             let index = self.nodes.len();
             self.nodes.push(Node {
                 name: entry.name,
+                file_name: entry.file_name.clone(),
                 kind: entry.kind,
                 presence,
                 depth,
@@ -202,8 +272,8 @@ impl Builder<'_> {
                 end: index + 1,
                 differs: presence != Presence::Both,
             });
-            if entry.kind == EntryKind::Directory {
-                let present = [presence.on_left(), presence.on_right()];
+            if entry.kind.is_dir() {
+                let present = [Side::Left, Side::Right].map(|side| presence.is_on(side));
                 let children = std::array::from_fn(|side| {
                     dirs[side]
                         .as_ref()
@@ -300,7 +370,7 @@ impl Outline {
             only_differences,
             rows: Vec::new(),
         };
-        outline.update_rows(diff);
+        outline.refresh(diff);
         outline
     }
 
@@ -309,7 +379,7 @@ impl Outline {
     pub fn set_only_differences(&mut self, diff: &TreeDiff, only_differences: bool) {
         if self.only_differences != only_differences {
             self.only_differences = only_differences;
-            self.update_rows(diff);
+            self.refresh(diff);
         }
     }
 
@@ -337,11 +407,12 @@ impl Outline {
     pub fn set_expanded(&mut self, diff: &TreeDiff, node: usize, expanded: bool) {
         if self.expanded[node] != expanded {
             self.expanded[node] = expanded;
-            self.update_rows(diff);
+            self.refresh(diff);
         }
     }
 
-    fn update_rows(&mut self, diff: &TreeDiff) {
+    /// Recomputes the visible rows, needed after the presence of nodes changed.
+    pub fn refresh(&mut self, diff: &TreeDiff) {
         self.rows.clear();
         let mut index = 0;
         while let Some(node) = diff.nodes.get(index) {
@@ -478,6 +549,25 @@ mod tests {
         );
         // "01.flac" is equal on both sides, so "CD1" stands in for it.
         assert_eq!(outline.nearest_row(2), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn files_of_different_sizes_still_pair_up() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for (side, contents) in [("left", "short"), ("right", "much longer")] {
+            fs::create_dir(temp.path().join(side))?;
+            fs::write(temp.path().join(side).join("song.mp3"), contents)?;
+        }
+
+        let diff = compare(&temp, "left", "right");
+
+        let nodes = diff
+            .nodes
+            .iter()
+            .map(|node| (node.name.as_str(), node.presence))
+            .collect::<Vec<_>>();
+        assert_eq!(nodes, [("song.mp3", Presence::Both)]);
         Ok(())
     }
 

@@ -2869,6 +2869,7 @@ dependencies = [
  "palette",
  "percent-encoding",
  "raw-window-handle",
+ "rustix",
  "tempfile",
  "tracing",
  "tracing-subscriber",
