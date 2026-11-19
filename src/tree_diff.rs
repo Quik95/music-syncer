@@ -1,13 +1,12 @@
 //! Recursive comparison of two directory trees by entry names, and the collapsible outline
 //! that shows it.
 
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, io, path::PathBuf};
 
-use crate::listing::{self, Entry, EntryKind, SortKey};
+use crate::{
+    listing::{self, Entry, EntryKind, SortKey},
+    location::Location,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
@@ -49,7 +48,7 @@ impl Node {
 
 #[derive(Debug)]
 pub struct ReadError {
-    pub path: PathBuf,
+    pub path: Location,
     pub message: String,
 }
 
@@ -69,16 +68,16 @@ pub struct Missing {
 }
 
 impl TreeDiff {
-    /// Reads both trees fully; symlinked directories are followed unless they lead back to
-    /// a directory being compared above them.
-    pub fn compare(left: &Path, right: &Path) -> Self {
+    /// Reads both trees fully; local symlinked directories are followed unless they lead
+    /// back to a directory being compared above them.
+    pub fn compare(left: &Location, right: &Location) -> Self {
         let mut builder = Builder {
             nodes: Vec::new(),
             errors: Vec::new(),
         };
         let mut ancestors = [Vec::new(), Vec::new()];
-        let roots = [left, right].map(|root| root.to_path_buf());
-        let roots = builder.enter(roots.map(Some), &mut ancestors);
+        let roots = [left, right].map(|root| Some(root.clone()));
+        let roots = builder.enter(roots, &mut ancestors);
         builder.add_children(&roots, None, 0, &mut ancestors);
         Self {
             nodes: builder.nodes,
@@ -112,7 +111,7 @@ impl Builder {
     /// Children of `dirs`, merged by name. Returns whether any of them differs.
     fn add_children(
         &mut self,
-        dirs: &[Option<PathBuf>; 2],
+        dirs: &[Option<Location>; 2],
         parent: Option<usize>,
         depth: usize,
         ancestors: &mut [Vec<PathBuf>; 2],
@@ -160,7 +159,10 @@ impl Builder {
                 let children = self.enter(children, ancestors);
                 let child_differs = self.add_children(&children, Some(index), depth + 1, ancestors);
                 for (side, child) in children.iter().enumerate() {
-                    if child.is_some() {
+                    if child
+                        .as_ref()
+                        .is_some_and(|child| child.as_local().is_some())
+                    {
                         ancestors[side].pop();
                     }
                 }
@@ -174,21 +176,25 @@ impl Builder {
         differs
     }
 
-    /// Records each directory as an ancestor on its side. A directory that cannot be
-    /// resolved or is already an ancestor is reported and not descended into.
+    /// Records each local directory as an ancestor on its side. A local directory that
+    /// cannot be resolved or is already an ancestor is reported and not descended into.
+    /// MTP has no symlinks, so its directories pass unchecked.
     fn enter(
         &mut self,
-        dirs: [Option<PathBuf>; 2],
+        dirs: [Option<Location>; 2],
         ancestors: &mut [Vec<PathBuf>; 2],
-    ) -> [Option<PathBuf>; 2] {
+    ) -> [Option<Location>; 2] {
         let mut side = 0;
         dirs.map(|dir| {
             let ancestors = &mut ancestors[side];
             side += 1;
             let dir = dir?;
-            match fs::canonicalize(&dir) {
+            let Some(local) = dir.as_local() else {
+                return Some(dir);
+            };
+            match fs::canonicalize(local) {
                 Ok(real) if ancestors.contains(&real) => {
-                    tracing::warn!(path = %dir.display(), target = %real.display(), "symlink loop");
+                    tracing::warn!(path = %dir, target = %real.display(), "symlink loop");
                     self.errors.push(ReadError {
                         message: format!("symlink loop back to {}", real.display()),
                         path: dir,
@@ -207,10 +213,10 @@ impl Builder {
         })
     }
 
-    fn error(&mut self, path: &Path, error: &io::Error) {
-        tracing::warn!(path = %path.display(), %error, "cannot compare directory");
+    fn error(&mut self, path: &Location, error: &io::Error) {
+        tracing::warn!(%path, %error, "cannot compare directory");
         self.errors.push(ReadError {
-            path: path.to_path_buf(),
+            path: path.clone(),
             message: error.to_string(),
         });
     }
@@ -278,6 +284,11 @@ impl Outline {
 mod tests {
     use super::*;
 
+    fn compare(temp: &tempfile::TempDir, left: &str, right: &str) -> TreeDiff {
+        let side = |name| Location::local(temp.path().join(name));
+        TreeDiff::compare(&side(left), &side(right))
+    }
+
     fn fixture() -> io::Result<tempfile::TempDir> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -310,7 +321,7 @@ mod tests {
     #[test]
     fn merges_both_trees_and_marks_one_sided_entries() -> io::Result<()> {
         let temp = fixture()?;
-        let diff = TreeDiff::compare(&temp.path().join("left"), &temp.path().join("right"));
+        let diff = compare(&temp, "left", "right");
 
         let nodes = diff
             .nodes
@@ -343,7 +354,7 @@ mod tests {
     #[test]
     fn outline_expands_only_differing_directories_on_both_sides() -> io::Result<()> {
         let temp = fixture()?;
-        let diff = TreeDiff::compare(&temp.path().join("left"), &temp.path().join("right"));
+        let diff = compare(&temp, "left", "right");
         let mut outline = Outline::new(&diff);
 
         let names = |outline: &Outline| {
@@ -376,10 +387,13 @@ mod tests {
     #[test]
     fn unreadable_side_is_reported_and_compared_as_empty() -> io::Result<()> {
         let temp = fixture()?;
-        let diff = TreeDiff::compare(&temp.path().join("left"), &temp.path().join("missing"));
+        let diff = compare(&temp, "left", "missing");
 
         assert_eq!(diff.errors.len(), 1);
-        assert_eq!(diff.errors[0].path, temp.path().join("missing"));
+        assert_eq!(
+            diff.errors[0].path,
+            Location::Local(temp.path().join("missing"))
+        );
         assert!(
             diff.nodes
                 .iter()
@@ -395,10 +409,10 @@ mod tests {
         let left = temp.path().join("left");
         std::os::unix::fs::symlink(&left, left.join("Same/loop"))?;
 
-        let diff = TreeDiff::compare(&left, &temp.path().join("right"));
+        let diff = compare(&temp, "left", "right");
 
         assert_eq!(diff.errors.len(), 1);
-        assert_eq!(diff.errors[0].path, left.join("Same/loop"));
+        assert_eq!(diff.errors[0].path, Location::Local(left.join("Same/loop")));
         let looped = diff.nodes.iter().position(|node| node.name == "loop");
         assert!(looped.is_some_and(|index| !diff.nodes[index].has_children(index)));
         Ok(())

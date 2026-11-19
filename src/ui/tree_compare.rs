@@ -1,4 +1,4 @@
-use std::{ops::Range, path::PathBuf};
+use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton, Rgba,
@@ -13,6 +13,7 @@ use super::{
 use crate::{
     cursor::{Cursor, Move},
     listing::EntryKind,
+    location::Location,
     tree_diff::{Node, Outline, Presence, TreeDiff},
 };
 
@@ -53,11 +54,11 @@ enum Side {
 
 impl TreeCompare {
     /// Reads both trees in the background.
-    pub fn new(left: PathBuf, right: PathBuf, cx: &mut Context<Self>) -> Self {
-        let left_title = left.display().to_string().into();
-        let right_title = right.display().to_string().into();
+    pub fn new(left: Location, right: Location, cx: &mut Context<Self>) -> Self {
+        let left_title = left.to_string().into();
+        let right_title = right.to_string().into();
         let task = cx.spawn(async move |this, cx| {
-            tracing::info!(left = %left.display(), right = %right.display(), "comparing trees");
+            tracing::info!(%left, %right, "comparing trees");
             let diff = cx
                 .background_executor()
                 .spawn(async move { TreeDiff::compare(&left, &right) })
@@ -320,7 +321,7 @@ fn summary(diff: &TreeDiff) -> SharedString {
         summary += &format!(
             " · {} unreadable, first: {}: {}",
             diff.errors.len(),
-            first.path.display(),
+            first.path,
             first.message
         );
     }

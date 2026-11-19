@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::{location::Location, mtp};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntryKind {
     Directory,
@@ -21,35 +23,30 @@ pub struct Entry {
 /// Immediate children of a directory, or the error that prevented reading it.
 #[derive(Debug)]
 pub struct Listing {
-    pub path: PathBuf,
+    pub path: Location,
     pub entries: io::Result<Vec<Entry>>,
 }
 
 impl Listing {
-    /// Relative paths are made absolute against the current directory and trailing slashes
-    /// are dropped; symlinks stay unresolved.
-    pub fn read(path: PathBuf) -> Self {
-        let path: PathBuf = std::path::absolute(&path)
-            .unwrap_or(path)
-            .components()
-            .collect();
+    pub fn read(path: Location) -> Self {
         let entries = read_entries(&path);
         if let Err(error) = &entries {
-            tracing::warn!(path = %path.display(), %error, "cannot list directory");
+            tracing::warn!(%path, %error, "cannot list directory");
         }
         Self { path, entries }
     }
 
-    /// Path of the entry at `index` if it is a directory.
-    pub fn subdirectory(&self, index: usize) -> Option<PathBuf> {
+    /// Location of the entry at `index` if it is a directory.
+    pub fn subdirectory(&self, index: usize) -> Option<Location> {
         let entry = self.entries.as_ref().ok()?.get(index)?;
         (entry.kind == EntryKind::Directory).then(|| self.path.join(&entry.file_name))
     }
 
-    /// Path of the entry at `index` if it is a file.
-    pub fn file(&self, index: usize) -> Option<PathBuf> {
+    /// Path of the entry at `index` if it is a local file.
+    pub fn local_file(&self, index: usize) -> Option<PathBuf> {
         let entry = self.entries.as_ref().ok()?.get(index)?;
-        (entry.kind == EntryKind::File).then(|| self.path.join(&entry.file_name))
+        let dir = self.path.as_local()?;
+        (entry.kind == EntryKind::File).then(|| dir.join(&entry.file_name))
     }
 
     /// Index of the entry with exactly this on-disk name.
@@ -63,9 +60,18 @@ impl Listing {
 }
 
 /// Directories first, then files; each group in case-insensitive natural order.
-/// Symlinks are classified by their target.
-pub fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
-    let mut entries = fs::read_dir(dir)?
+/// Local symlinks are classified by their target.
+pub fn read_entries(dir: &Location) -> io::Result<Vec<Entry>> {
+    let mut entries = match dir {
+        Location::Local(path) => read_local_entries(path)?,
+        Location::Mtp(path) => mtp::read_dir(path)?,
+    };
+    entries.sort_by_cached_key(sort_key);
+    Ok(entries)
+}
+
+fn read_local_entries(dir: &Path) -> io::Result<Vec<Entry>> {
+    fs::read_dir(dir)?
         .map(|entry| {
             let entry = entry?;
             let kind = if entry.path().is_dir() {
@@ -80,9 +86,7 @@ pub fn read_entries(dir: &Path) -> io::Result<Vec<Entry>> {
                 kind,
             })
         })
-        .collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_cached_key(sort_key);
-    Ok(entries)
+        .collect()
 }
 
 /// Position of an entry in a listing. Entries with equal keys have the same kind and
@@ -147,7 +151,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("b-dir"), root.join("link-to-dir"))?;
 
-        let listing = Listing::read(root.to_path_buf());
+        let listing = Listing::read(Location::local(root.to_path_buf()));
 
         let names = listing
             .entries?
@@ -202,9 +206,12 @@ mod tests {
         fs::create_dir(temp.path().join("dir"))?;
         fs::write(temp.path().join("file"), "")?;
 
-        let listing = Listing::read(temp.path().to_path_buf());
+        let listing = Listing::read(Location::local(temp.path().to_path_buf()));
 
-        assert_eq!(listing.subdirectory(0), Some(temp.path().join("dir")));
+        assert_eq!(
+            listing.subdirectory(0),
+            Some(Location::Local(temp.path().join("dir")))
+        );
         assert_eq!(listing.subdirectory(1), None);
         assert_eq!(listing.subdirectory(2), None);
         Ok(())
@@ -219,11 +226,11 @@ mod tests {
         let name = OsStr::from_bytes(b"caf\xe9");
         fs::create_dir(temp.path().join(name))?;
 
-        let listing = Listing::read(temp.path().to_path_buf());
+        let listing = Listing::read(Location::local(temp.path().to_path_buf()));
 
         let child = listing.subdirectory(0);
-        assert_eq!(child, Some(temp.path().join(name)));
-        assert!(child.is_some_and(|path| path.is_dir()));
+        assert_eq!(child, Some(Location::Local(temp.path().join(name))));
+        assert!(child.is_some_and(|child| child.as_local().is_some_and(Path::is_dir)));
         assert_eq!(listing.position(name), Some(0));
         Ok(())
     }

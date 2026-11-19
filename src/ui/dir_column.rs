@@ -1,7 +1,4 @@
-use std::{
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::{ops::Range, path::PathBuf};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
@@ -20,6 +17,7 @@ use super::{
 use crate::{
     cursor::{Cursor, Move},
     listing::{EntryKind, Listing},
+    location::Location,
     track,
 };
 
@@ -83,7 +81,7 @@ impl DirColumn {
         let path = self
             .cursor
             .index()
-            .and_then(|index| self.listing.file(index))
+            .and_then(|index| self.listing.local_file(index))
             .filter(|path| track::is_audio(path));
 
         if self.preview.as_ref().map(|preview| &preview.path) == path.as_ref() {
@@ -151,7 +149,7 @@ impl DirColumn {
         let Some(parent) = self.listing.path.parent() else {
             return;
         };
-        let listing = Listing::read(parent.to_path_buf());
+        let listing = Listing::read(parent);
         let len = entry_count(&listing);
         let mut cursor = Cursor::new(len);
         if let Some(index) = self
@@ -194,7 +192,7 @@ impl DirColumn {
         strategy: ScrollStrategy,
         cx: &mut Context<Self>,
     ) {
-        tracing::debug!(path = %listing.path.display(), "opening directory");
+        tracing::debug!(path = %listing.path, "opening directory");
         self.title = title(&listing);
         self.listing = listing;
         self.cursor = cursor;
@@ -206,7 +204,7 @@ impl DirColumn {
         cx.notify();
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &Location {
         &self.listing.path
     }
 
@@ -285,7 +283,7 @@ impl DirColumn {
 }
 
 fn title(listing: &Listing) -> SharedString {
-    listing.path.display().to_string().into()
+    listing.path.to_string().into()
 }
 
 fn entry_count(listing: &Listing) -> usize {

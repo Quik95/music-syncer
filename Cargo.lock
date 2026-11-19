@@ -2867,11 +2867,13 @@ dependencies = [
  "jiff",
  "lofty",
  "palette",
+ "percent-encoding",
  "raw-window-handle",
  "tempfile",
  "tracing",
  "tracing-subscriber",
  "url",
+ "zbus 5.19.0",
 ]
 
 [[package]]

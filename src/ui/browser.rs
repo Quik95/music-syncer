@@ -45,8 +45,8 @@ impl Browser {
         if self.compare.take().is_some() {
             window.focus(&self.left.focus_handle(cx), cx);
         } else {
-            let left = self.left.read(cx).path().to_path_buf();
-            let right = self.right.read(cx).path().to_path_buf();
+            let left = self.left.read(cx).path().clone();
+            let right = self.right.read(cx).path().clone();
             let compare = cx.new(|cx| TreeCompare::new(left, right, cx));
             window.focus(&compare.focus_handle(cx), cx);
             self.compare = Some(compare);
