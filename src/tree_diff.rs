@@ -1,7 +1,12 @@
 //! Recursive comparison of two directory trees by entry names, and the collapsible outline
 //! that shows it.
 
-use std::{collections::BTreeMap, fs, io, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::PathBuf,
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+};
 
 use crate::{
     listing::{self, Entry, EntryKind, SortKey},
@@ -67,18 +72,59 @@ pub struct Missing {
     pub right: usize,
 }
 
+/// How far a running [`TreeDiff::compare`] got, readable from other threads.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// Estimated fraction done, in millionths.
+    done: AtomicU32,
+    entries: AtomicUsize,
+}
+
+impl Progress {
+    const SCALE: f64 = 1_000_000.;
+
+    /// Estimated share of the walk done, 0–1. Each directory's children split its share
+    /// equally, as sizes of unread subtrees are unknown.
+    pub fn fraction(&self) -> f32 {
+        (f64::from(self.done.load(Ordering::Relaxed)) / Self::SCALE) as f32
+    }
+
+    /// Entries found so far on either side.
+    pub fn entries(&self) -> usize {
+        self.entries.load(Ordering::Relaxed)
+    }
+
+    /// `levels` holds, from the root down, the index of the child being walked and the
+    /// number of children at that level.
+    fn update(&self, levels: &[(usize, usize)], entries: usize) {
+        let mut done = 0.;
+        let mut share = 1.;
+        for &(index, count) in levels {
+            share /= count as f64;
+            done += share * index as f64;
+        }
+        // Saturating float-to-int cast of a value within 0..=SCALE.
+        self.done
+            .store((done * Self::SCALE) as u32, Ordering::Relaxed);
+        self.entries.store(entries, Ordering::Relaxed);
+    }
+}
+
 impl TreeDiff {
-    /// Reads both trees fully; local symlinked directories are followed unless they lead
-    /// back to a directory being compared above them.
-    pub fn compare(left: &Location, right: &Location) -> Self {
+    /// Reads both trees fully, reporting to `progress`; local symlinked directories are
+    /// followed unless they lead back to a directory being compared above them.
+    pub fn compare(left: &Location, right: &Location, progress: &Progress) -> Self {
         let mut builder = Builder {
             nodes: Vec::new(),
             errors: Vec::new(),
+            levels: Vec::new(),
+            progress,
         };
         let mut ancestors = [Vec::new(), Vec::new()];
         let roots = [left, right].map(|root| Some(root.clone()));
         let roots = builder.enter(roots, &mut ancestors);
         builder.add_children(&roots, None, 0, &mut ancestors);
+        progress.update(&[(1, 1)], builder.nodes.len());
         Self {
             nodes: builder.nodes,
             errors: builder.errors,
@@ -102,12 +148,15 @@ impl TreeDiff {
     }
 }
 
-struct Builder {
+struct Builder<'a> {
     nodes: Vec<Node>,
     errors: Vec<ReadError>,
+    /// Position in each directory being walked, root first; see [`Progress::update`].
+    levels: Vec<(usize, usize)>,
+    progress: &'a Progress,
 }
 
-impl Builder {
+impl Builder<'_> {
     /// Children of `dirs`, merged by name. Returns whether any of them differs.
     fn add_children(
         &mut self,
@@ -131,7 +180,12 @@ impl Builder {
         }
 
         let mut differs = false;
-        for pair in merged.into_values() {
+        self.levels.push((0, merged.len()));
+        for (position, pair) in merged.into_values().enumerate() {
+            if let Some(level) = self.levels.last_mut() {
+                level.0 = position;
+            }
+            self.progress.update(&self.levels, self.nodes.len());
             let (presence, entry) = match pair {
                 [Some(entry), Some(_)] => (Presence::Both, entry),
                 [Some(entry), None] => (Presence::LeftOnly, entry),
@@ -173,6 +227,7 @@ impl Builder {
             }
             differs |= self.nodes[index].differs;
         }
+        self.levels.pop();
         differs
     }
 
@@ -286,7 +341,7 @@ mod tests {
 
     fn compare(temp: &tempfile::TempDir, left: &str, right: &str) -> TreeDiff {
         let side = |name| Location::local(temp.path().join(name));
-        TreeDiff::compare(&side(left), &side(right))
+        TreeDiff::compare(&side(left), &side(right), &Progress::default())
     }
 
     fn fixture() -> io::Result<tempfile::TempDir> {

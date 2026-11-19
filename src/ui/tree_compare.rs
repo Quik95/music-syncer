@@ -1,9 +1,9 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton, Rgba,
-    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
-    px, uniform_list,
+    Animation, AnimationExt as _, AnyElement, App, AsyncApp, ClickEvent, Context, Div, FocusHandle,
+    Focusable, MouseButton, Rgba, ScrollStrategy, SharedString, Task, UniformListScrollHandle,
+    WeakEntity, Window, actions, div, ease_in_out, prelude::*, px, relative, uniform_list,
 };
 
 use super::{
@@ -14,7 +14,7 @@ use crate::{
     cursor::{Cursor, Move},
     listing::EntryKind,
     location::Location,
-    tree_diff::{Node, Outline, Presence, TreeDiff},
+    tree_diff::{Node, Outline, Presence, Progress, TreeDiff},
 };
 
 pub const KEY_CONTEXT: &str = "TreeCompare";
@@ -22,6 +22,10 @@ pub const KEY_CONTEXT: &str = "TreeCompare";
 actions!(tree_compare, [Collapse, Expand, Toggle]);
 
 const INDENT: f32 = 16.;
+const PROGRESS_DELAY: Duration = Duration::from_millis(500);
+const PROGRESS_REFRESH: Duration = Duration::from_millis(100);
+/// Width of the sweeping highlight as a share of the filled part.
+const SWEEP_WIDTH: f32 = 0.4;
 
 /// Both trees merged into aligned rows, like a side-by-side diff: an entry missing on one
 /// side leaves a gap there. Directories expand and collapse.
@@ -32,10 +36,16 @@ pub struct TreeCompare {
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
     _compare: Task<()>,
+    _show_progress: Task<()>,
 }
 
 enum State {
-    Comparing,
+    /// The progress bar is `visible` only once the comparison takes longer than
+    /// [`PROGRESS_DELAY`], so quick ones do not flash it.
+    Comparing {
+        progress: Arc<Progress>,
+        visible: bool,
+    },
     Ready(Comparison),
 }
 
@@ -57,43 +67,70 @@ impl TreeCompare {
     pub fn new(left: Location, right: Location, cx: &mut Context<Self>) -> Self {
         let left_title = left.to_string().into();
         let right_title = right.to_string().into();
-        let task = cx.spawn(async move |this, cx| {
-            tracing::info!(%left, %right, "comparing trees");
-            let diff = cx
-                .background_executor()
-                .spawn(async move { TreeDiff::compare(&left, &right) })
-                .await;
-            tracing::info!(
-                nodes = diff.nodes.len(),
-                errors = diff.errors.len(),
-                "trees compared"
-            );
-            _ = this.update(cx, |this, cx| {
-                let outline = Outline::new(&diff);
-                let cursor = Cursor::new(outline.rows().len());
-                this.state = State::Ready(Comparison {
-                    summary: summary(&diff),
-                    diff,
-                    outline,
-                    cursor,
-                });
+        let progress = Arc::new(Progress::default());
+        let compare = cx.spawn({
+            let progress = progress.clone();
+            async move |this, cx| {
+                tracing::info!(%left, %right, "comparing trees");
+                let diff = cx
+                    .background_executor()
+                    .spawn(async move { TreeDiff::compare(&left, &right, &progress) })
+                    .await;
+                Self::finish(this, diff, cx);
+            }
+        });
+        // Also redraws while the bar is shown, since its animation pauses when the
+        // desktop asks for reduced motion.
+        let show_progress = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROGRESS_DELAY).await;
+            while let Ok(true) = this.update(cx, |this, cx| {
+                let State::Comparing { visible, .. } = &mut this.state else {
+                    return false;
+                };
+                *visible = true;
                 cx.notify();
-            });
+                true
+            }) {
+                cx.background_executor().timer(PROGRESS_REFRESH).await;
+            }
         });
         Self {
             left_title,
             right_title,
-            state: State::Comparing,
-            _compare: task,
+            state: State::Comparing {
+                progress,
+                visible: false,
+            },
+            _compare: compare,
+            _show_progress: show_progress,
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
     }
 
+    fn finish(this: WeakEntity<Self>, diff: TreeDiff, cx: &mut AsyncApp) {
+        tracing::info!(
+            nodes = diff.nodes.len(),
+            errors = diff.errors.len(),
+            "trees compared"
+        );
+        _ = this.update(cx, |this, cx| {
+            let outline = Outline::new(&diff);
+            let cursor = Cursor::new(outline.rows().len());
+            this.state = State::Ready(Comparison {
+                summary: summary(&diff),
+                diff,
+                outline,
+                cursor,
+            });
+            cx.notify();
+        });
+    }
+
     fn comparison(&mut self) -> Option<&mut Comparison> {
         match &mut self.state {
             State::Ready(comparison) => Some(comparison),
-            State::Comparing => None,
+            State::Comparing { .. } => None,
         }
     }
 
@@ -196,8 +233,12 @@ impl TreeCompare {
 
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
         let comparison = match &self.state {
-            State::Comparing => {
-                return div().px_2().child("Comparing…").into_any_element();
+            State::Comparing { progress, visible } => {
+                return if *visible {
+                    progress_bar(progress).into_any_element()
+                } else {
+                    div().into_any_element()
+                };
             }
             State::Ready(comparison) if comparison.outline.rows().is_empty() => {
                 return div().px_2().child("(both empty)").into_any_element();
@@ -307,6 +348,53 @@ fn cell(node: &Node, disclosure: Option<&'static str>, side: Side, active_bg: Op
         .child(div().min_w_0().truncate().child(name))
 }
 
+/// Estimated progress with a highlight sweeping across the filled part, and the number of
+/// entries found, centered in the list area.
+fn progress_bar(progress: &Progress) -> impl IntoElement {
+    let sweep = div()
+        .absolute()
+        .top_0()
+        .h_full()
+        .w(relative(SWEEP_WIDTH))
+        .bg(*theme::PROGRESS_SWEEP)
+        .with_animation(
+            "progress-sweep",
+            Animation::new(Duration::from_millis(1200))
+                .repeat()
+                .with_easing(ease_in_out),
+            // From fully left of the fill to fully right of it.
+            |sweep, delta| sweep.left(relative(delta * (1. + SWEEP_WIDTH) - SWEEP_WIDTH)),
+        );
+    let fill = div()
+        .relative()
+        .h_full()
+        .w(relative(progress.fraction()))
+        .overflow_hidden()
+        .rounded_full()
+        .bg(*theme::PROGRESS)
+        .child(sweep);
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(320.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(*theme::PROGRESS_TRACK)
+                .child(fill),
+        )
+        .child(
+            div()
+                .text_color(*theme::TEXT_MUTED)
+                .child(format!("Comparing… {} entries", progress.entries())),
+        )
+}
+
 fn summary(diff: &TreeDiff) -> SharedString {
     let missing = diff.missing();
     let mut summary = if missing.left == 0 && missing.right == 0 {
@@ -338,7 +426,7 @@ impl Render for TreeCompare {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = |this: &Self| match &this.state {
             State::Ready(comparison) => page_rows(&this.scroll, comparison.outline.rows().len()),
-            State::Comparing => 1,
+            State::Comparing { .. } => 1,
         };
         let header = |title: SharedString| {
             div()
@@ -351,7 +439,7 @@ impl Render for TreeCompare {
         };
         let status = match &self.state {
             State::Ready(comparison) => comparison.summary.clone(),
-            State::Comparing => SharedString::new_static(""),
+            State::Comparing { .. } => SharedString::new_static(""),
         };
         div()
             .key_context(KEY_CONTEXT)
