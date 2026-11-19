@@ -35,6 +35,7 @@ pub struct TreeCompare {
     state: State,
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
+    only_differences: bool,
     _compare: Task<()>,
     _show_progress: Task<()>,
 }
@@ -103,6 +104,7 @@ impl TreeCompare {
             },
             _compare: compare,
             _show_progress: show_progress,
+            only_differences: false,
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
@@ -115,7 +117,7 @@ impl TreeCompare {
             "trees compared"
         );
         _ = this.update(cx, |this, cx| {
-            let outline = Outline::new(&diff);
+            let outline = Outline::new(&diff, this.only_differences);
             let cursor = Cursor::new(outline.rows().len());
             this.state = State::Ready(Comparison {
                 summary: summary(&diff),
@@ -125,6 +127,30 @@ impl TreeCompare {
             });
             cx.notify();
         });
+    }
+
+    pub fn only_differences(&self) -> bool {
+        self.only_differences
+    }
+
+    /// Shows only entries missing on a side and directories containing such entries.
+    /// The active entry stays active, or the nearest visible one above it when hidden.
+    pub fn set_only_differences(&mut self, only_differences: bool, cx: &mut Context<Self>) {
+        self.only_differences = only_differences;
+        let active = self.active_node();
+        let Some(comparison) = self.comparison() else {
+            return;
+        };
+        comparison
+            .outline
+            .set_only_differences(&comparison.diff, only_differences);
+        let len = comparison.outline.rows().len();
+        comparison.cursor = Cursor::new(len);
+        if let Some(row) = active.and_then(|node| comparison.outline.nearest_row(node)) {
+            comparison.cursor.select(row, len);
+            self.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        }
+        cx.notify();
     }
 
     fn comparison(&mut self) -> Option<&mut Comparison> {

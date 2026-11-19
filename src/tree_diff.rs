@@ -277,17 +277,19 @@ impl Builder<'_> {
     }
 }
 
-/// Which directories of a [`TreeDiff`] are expanded, and the nodes that are therefore visible.
+/// Which directories of a [`TreeDiff`] are expanded, whether entries equal on both sides
+/// are hidden, and the nodes that are therefore visible.
 #[derive(Debug)]
 pub struct Outline {
     expanded: Vec<bool>,
+    only_differences: bool,
     rows: Vec<usize>,
 }
 
 impl Outline {
     /// Expands the directories present on both sides that differ, so every difference is
     /// visible except the contents of one-sided directories.
-    pub fn new(diff: &TreeDiff) -> Self {
+    pub fn new(diff: &TreeDiff, only_differences: bool) -> Self {
         let expanded = diff
             .nodes
             .iter()
@@ -295,10 +297,28 @@ impl Outline {
             .collect();
         let mut outline = Self {
             expanded,
+            only_differences,
             rows: Vec::new(),
         };
         outline.update_rows(diff);
         outline
+    }
+
+    /// Hides entries, with everything below them, that exist on both sides with equal
+    /// contents.
+    pub fn set_only_differences(&mut self, diff: &TreeDiff, only_differences: bool) {
+        if self.only_differences != only_differences {
+            self.only_differences = only_differences;
+            self.update_rows(diff);
+        }
+    }
+
+    /// Row of `node`, or of the closest visible node above it when it is hidden.
+    pub fn nearest_row(&self, node: usize) -> Option<usize> {
+        let after = self.rows.partition_point(|&row_node| row_node <= node);
+        after
+            .checked_sub(1)
+            .or((!self.rows.is_empty()).then_some(0))
     }
 
     /// Visible node indices, ascending.
@@ -325,6 +345,10 @@ impl Outline {
         self.rows.clear();
         let mut index = 0;
         while let Some(node) = diff.nodes.get(index) {
+            if self.only_differences && !node.differs {
+                index = node.end;
+                continue;
+            }
             self.rows.push(index);
             index = if self.expanded[index] {
                 index + 1
@@ -410,7 +434,7 @@ mod tests {
     fn outline_expands_only_differing_directories_on_both_sides() -> io::Result<()> {
         let temp = fixture()?;
         let diff = compare(&temp, "left", "right");
-        let mut outline = Outline::new(&diff);
+        let mut outline = Outline::new(&diff, false);
 
         let names = |outline: &Outline| {
             outline
@@ -436,6 +460,24 @@ mod tests {
         );
         assert_eq!(outline.row_of(7), Some(3));
         assert_eq!(outline.row_of(8), None);
+
+        outline.set_only_differences(&diff, true);
+        assert_eq!(
+            names(&outline),
+            ["Album", "cover", "Gone", "9.flac", "10.flac", "cover"]
+        );
+        // "Same" is hidden; the nearest row above it is "Gone".
+        assert_eq!(outline.nearest_row(7), Some(2));
+
+        outline.set_expanded(&diff, 0, true);
+        assert_eq!(
+            names(&outline),
+            [
+                "Album", "CD1", "02.flac", "cover", "Gone", "9.flac", "10.flac", "cover"
+            ]
+        );
+        // "01.flac" is equal on both sides, so "CD1" stands in for it.
+        assert_eq!(outline.nearest_row(2), Some(1));
         Ok(())
     }
 

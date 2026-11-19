@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, Focusable as _, SharedString, Window, actions,
-    div, prelude::*,
+    AppContext as _, ClickEvent, Context, Div, Entity, Focusable as _, SharedString, Stateful,
+    Window, actions, div, prelude::*,
 };
 
 use super::{dir_column::DirColumn, theme, tree_compare::TreeCompare};
@@ -60,27 +60,49 @@ impl Browser {
         } else {
             "Compare trees".into()
         };
+        let filter = self.compare.as_ref().map(|compare| {
+            let on = compare.read(cx).only_differences();
+            let compare = compare.clone();
+            button("only-differences", on)
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    compare.update(cx, |compare, cx| compare.set_only_differences(!on, cx));
+                    cx.notify();
+                }))
+                .child("Only differences")
+        });
         div()
             .flex()
             .flex_none()
+            .gap_2()
             .px_2()
             .py_1()
             .border_b_1()
             .border_color(*theme::BORDER)
             .child(
-                div()
-                    .id("compare")
+                button("compare", false)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_compare(window, cx);
                     }))
-                    .cursor_pointer()
-                    .px_2()
-                    .rounded_sm()
-                    .bg(*theme::BUTTON)
-                    .hover(|style| style.bg(*theme::BUTTON_HOVER))
                     .child(label),
             )
+            .children(filter)
     }
+}
+
+/// A toolbar button; a `pressed` one stays highlighted, for toggles that are on.
+fn button(id: &'static str, pressed: bool) -> Stateful<Div> {
+    let background = if pressed {
+        *theme::BUTTON_PRESSED
+    } else {
+        *theme::BUTTON
+    };
+    div()
+        .id(id)
+        .cursor_pointer()
+        .px_2()
+        .rounded_sm()
+        .bg(background)
+        .hover(|style| style.bg(*theme::BUTTON_HOVER))
 }
 
 impl Render for Browser {
