@@ -6,10 +6,10 @@ use gpui::{
 use super::{
     dir_column::DirColumn,
     theme,
-    tree_compare::{CopyScope, TreeCompare},
+    tree_compare::{Scope, TreeCompare},
     widgets::button,
 };
-use crate::{listing::Listing, tree_diff::Side};
+use crate::{listing::Listing, sync::Action, tree_diff::Side};
 
 pub const KEY_CONTEXT: &str = "Browser";
 
@@ -81,6 +81,7 @@ impl Browser {
             .unwrap_or_default();
         div()
             .flex()
+            .flex_wrap()
             .flex_none()
             .gap_2()
             .px_2()
@@ -112,39 +113,56 @@ impl Browser {
                 }
             }))
             .child("Only differences");
+        let checks = [
+            ("check-active", "Check contents", Scope::Active),
+            ("check-all", "Check all contents", Scope::All),
+        ]
+        .map(|(id, label, scope)| {
+            let enabled = view.can_check(scope);
+            let compare = compare.clone();
+            button(id, false, enabled)
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    compare.update(cx, |compare, cx| compare.check_contents(scope, cx));
+                }))
+                .child(label)
+        });
+        let to_right = Action::Copy {
+            target: Side::Right,
+        };
+        let to_left = Action::Copy { target: Side::Left };
         let actions = [
+            ("copy-active-right", "Copy →", Scope::Active, to_right),
+            ("copy-active-left", "← Copy", Scope::Active, to_left),
+            ("copy-all-right", "Copy all missing →", Scope::All, to_right),
+            ("copy-all-left", "← Copy all missing", Scope::All, to_left),
             (
-                "copy-active-right",
-                "Copy →",
-                CopyScope::Active,
-                Side::Right,
-            ),
-            ("copy-active-left", "← Copy", CopyScope::Active, Side::Left),
-            (
-                "copy-all-right",
-                "Copy all missing →",
-                CopyScope::All,
-                Side::Right,
+                "overwrite-active",
+                "Overwrite →",
+                Scope::Active,
+                Action::Overwrite,
             ),
             (
-                "copy-all-left",
-                "← Copy all missing",
-                CopyScope::All,
-                Side::Left,
+                "overwrite-all",
+                "Overwrite all changed →",
+                Scope::All,
+                Action::Overwrite,
             ),
-        ];
-        let copies = actions.map(|(id, label, scope, target)| {
-            let enabled = view.can_copy(scope, target);
+        ]
+        .map(|(id, label, scope, action)| {
+            let enabled = view.can_run(scope, action);
             let compare = compare.clone();
             button(id, false, enabled)
                 .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
                     compare.update(cx, |compare, cx| {
-                        compare.request_copy(scope, target, window, cx);
+                        compare.request(scope, action, window, cx);
                     });
                 }))
                 .child(label)
         });
-        std::iter::once(filter).chain(copies).collect()
+        std::iter::once(filter)
+            .chain(checks)
+            .chain(actions)
+            .collect()
     }
 }
 

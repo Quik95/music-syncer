@@ -2,11 +2,13 @@ use std::{ffi::OsString, process::ExitCode};
 
 use directories::UserDirs;
 
+mod content;
 mod cursor;
 mod listing;
 mod location;
 mod logging;
 mod mtp;
+mod progress;
 mod sync;
 mod track;
 mod tree_diff;

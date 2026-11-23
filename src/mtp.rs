@@ -80,6 +80,10 @@ trait Storage {
         destination_path: &str,
     ) -> zbus::Result<i32>;
 
+    /// libmtp's result; 0 on success.
+    #[zbus(name = "deleteObject")]
+    fn delete_object(&self, path: &str) -> zbus::Result<i32>;
+
     /// libmtp's result of the transfer started last; 0 on success.
     #[zbus(signal, name = "copyFinished")]
     fn copy_finished(&self, result: i32) -> zbus::Result<()>;
@@ -136,11 +140,51 @@ pub fn send_file(source: &File, target: &MtpPath) -> anyhow::Result<()> {
         file_metadata(&storage, &target_path)?.is_none(),
         "already exists on the phone"
     );
+    upload(&storage, source, &target_path)
+}
+
+/// Uploads `source` in place of the file at `target`. MTP can neither overwrite nor rename
+/// atomically, so the old version is deleted first; when the upload then fails, `target`
+/// is left missing rather than incomplete, and a retry just uploads.
+pub fn replace_file(source: &File, target: &MtpPath) -> anyhow::Result<()> {
+    let storage = storage(target)?;
+    let target_path = target.storage_path();
+    if file_metadata(&storage, &target_path)?.is_some() {
+        delete(&storage, &target_path).context("cannot delete the old version")?;
+    }
+    upload(&storage, source, &target_path)
+        .context("the old version is deleted, but the new one did not arrive")
+}
+
+/// Uploads `source` as a new file at `path`. When the transfer fails, whatever arrived
+/// of it is deleted.
+fn upload(storage: &StorageProxy<'_>, source: &File, path: &str) -> anyhow::Result<()> {
+    let result = transfer(storage, source, path);
+    if result.is_err()
+        && file_metadata(storage, path).is_ok_and(|file| file.is_some())
+        && let Err(error) = delete(storage, path)
+    {
+        tracing::warn!(
+            path,
+            error = format!("{error:#}"),
+            "cannot delete an incomplete upload"
+        );
+    }
+    result
+}
+
+fn transfer(storage: &StorageProxy<'_>, source: &File, path: &str) -> anyhow::Result<()> {
     // Subscribed before starting so the signal cannot be missed.
     let finished = storage.receive_copy_finished()?;
-    let status = storage.send_file_from_file_descriptor(Fd::from(source.as_fd()), &target_path)?;
+    let status = storage.send_file_from_file_descriptor(Fd::from(source.as_fd()), path)?;
     ensure!(status == 0, "kmtpd refused the upload (status {status})");
     wait(finished)
+}
+
+fn delete(storage: &StorageProxy<'_>, path: &str) -> anyhow::Result<()> {
+    let status = storage.delete_object(path)?;
+    ensure!(status == 0, "kmtpd cannot delete {path} (status {status})");
+    Ok(())
 }
 
 /// Downloads the file at `source` into `target`.
@@ -157,6 +201,11 @@ pub fn receive_file(source: &MtpPath, target: &File) -> anyhow::Result<()> {
 fn file_metadata(storage: &StorageProxy<'_>, path: &str) -> zbus::Result<Option<MtpFile>> {
     let file = storage.get_file_metadata(path)?;
     Ok((file.0 != 0).then_some(file))
+}
+
+/// Whether a file or folder exists at `path`.
+pub fn exists(path: &MtpPath) -> anyhow::Result<bool> {
+    Ok(file_metadata(&storage(path)?, &path.storage_path())?.is_some())
 }
 
 pub fn free_space(path: &MtpPath) -> anyhow::Result<u64> {

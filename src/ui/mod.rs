@@ -70,7 +70,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", tree_compare::Toggle, compare),
         KeyBinding::new("shift-right", tree_compare::CopyActiveToRight, compare),
         KeyBinding::new("shift-left", tree_compare::CopyActiveToLeft, compare),
-        KeyBinding::new("escape", tree_compare::CancelCopy, compare),
+        KeyBinding::new("escape", tree_compare::Cancel, compare),
         KeyBinding::new("left", browser::FocusLeftColumn, browser),
         KeyBinding::new("right", browser::FocusRightColumn, browser),
         KeyBinding::new("tab", browser::FocusOtherColumn, browser),

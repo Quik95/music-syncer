@@ -69,10 +69,48 @@ pub struct Node {
     pub presence: Presence,
     pub depth: usize,
     pub parent: Option<usize>,
+    /// For a file on both sides, whether the two have the same contents; `None` for
+    /// anything else.
+    pub content: Option<Content>,
+    /// For a file on both sides, its size on the right, as `kind` holds the left's.
+    pub right_size: Option<u64>,
     /// One past the index of the last node in this node's subtree.
     pub end: usize,
-    /// This node or something below it exists on one side only.
+    /// This node or something below it exists on one side only or has changed contents.
     pub differs: bool,
+}
+
+impl Node {
+    /// Whether this node differs regardless of its children.
+    fn differs_itself(&self) -> bool {
+        self.presence != Presence::Both || self.content == Some(Content::Changed)
+    }
+}
+
+/// How the contents of a file on both sides compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    /// Equal sizes; the bytes were not compared yet.
+    Unchecked,
+    Same,
+    /// Different sizes or bytes.
+    Changed,
+}
+
+impl Content {
+    /// Equal sizes are only a hint, so they leave the contents unchecked.
+    fn of(left: EntryKind, right: EntryKind) -> Option<Self> {
+        match (left, right) {
+            (EntryKind::File { size: left }, EntryKind::File { size: right }) => {
+                Some(if left == right {
+                    Self::Unchecked
+                } else {
+                    Self::Changed
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -89,8 +127,18 @@ pub struct TreeDiff {
     roots: [Location; 2],
     pub nodes: Vec<Node>,
     pub errors: Vec<ReadError>,
-    /// Kept up to date as nodes are added or copied, so reading it costs nothing.
-    missing: Missing,
+    /// Kept up to date as nodes are added, checked or copied, so reading it costs nothing.
+    counts: Counts,
+}
+
+/// Differences in a [`TreeDiff`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    pub missing: Missing,
+    /// Files on both sides with different contents.
+    pub changed: usize,
+    /// Files on both sides with equal sizes whose bytes were not compared yet.
+    pub unchecked: usize,
 }
 
 /// Entries present on one side only, counting a one-sided directory once.
@@ -100,10 +148,14 @@ pub struct Missing {
     pub right: usize,
 }
 
-impl Missing {
-    /// Counts `node` when it is one-sided and its parent, if any, is on both sides.
-    fn count(&mut self, nodes: &[Node], node: usize) {
+impl Counts {
+    /// Counts `node` as missing when it is one-sided and its parent, if any, is on both
+    /// sides, and by its contents.
+    fn add(&mut self, nodes: &[Node], node: usize) {
         let node = &nodes[node];
+        if let Some(count) = self.of_content(node.content) {
+            *count += 1;
+        }
         if node
             .parent
             .is_some_and(|parent| nodes[parent].presence != Presence::Both)
@@ -112,8 +164,16 @@ impl Missing {
         }
         match node.presence {
             Presence::Both => {}
-            Presence::LeftOnly => self.right += 1,
-            Presence::RightOnly => self.left += 1,
+            Presence::LeftOnly => self.missing.right += 1,
+            Presence::RightOnly => self.missing.left += 1,
+        }
+    }
+
+    fn of_content(&mut self, content: Option<Content>) -> Option<&mut usize> {
+        match content? {
+            Content::Unchecked => Some(&mut self.unchecked),
+            Content::Changed => Some(&mut self.changed),
+            Content::Same => None,
         }
     }
 }
@@ -189,7 +249,7 @@ impl TreeDiff {
             roots: [left, right],
             nodes: Vec::new(),
             errors: Vec::new(),
-            missing: Missing::default(),
+            counts: Counts::default(),
         }
     }
 
@@ -222,7 +282,7 @@ impl TreeDiff {
             let differs = node.differs;
             let mut parent = node.parent;
             self.nodes.push(node);
-            self.missing.count(&self.nodes, index);
+            self.counts.add(&self.nodes, index);
             while let Some(index_above) = parent {
                 let ancestor = &mut self.nodes[index_above];
                 ancestor.end = index + 1;
@@ -260,28 +320,87 @@ impl TreeDiff {
             })
     }
 
-    /// Records that `nodes` now exist on both sides and updates which subtrees differ.
-    pub fn mark_on_both(&mut self, nodes: &[usize]) {
-        for &node in nodes {
-            self.nodes[node].presence = Presence::Both;
+    /// Records the verdict on the unchecked contents of `node`, a file on both sides.
+    /// Returns the nodes that started to differ, `node` included.
+    pub fn set_content(&mut self, node: usize, content: Content) -> Vec<usize> {
+        let old = self.nodes[node].content.replace(content);
+        debug_assert_eq!(old, Some(Content::Unchecked));
+        if let Some(count) = self.counts.of_content(old) {
+            *count -= 1;
         }
+        if let Some(count) = self.counts.of_content(Some(content)) {
+            *count += 1;
+        }
+        let mut started_differing = Vec::new();
+        if content != Content::Changed {
+            return started_differing;
+        }
+        // Above a node that already differs, everything does.
+        let mut current = Some(node);
+        while let Some(index) = current {
+            let node = &mut self.nodes[index];
+            if node.differs {
+                break;
+            }
+            node.differs = true;
+            started_differing.push(index);
+            current = node.parent;
+        }
+        started_differing
+    }
+
+    /// Records that `nodes` now exist on both sides, files with the same contents, and
+    /// updates which subtrees differ.
+    pub fn mark_copied(&mut self, nodes: &[usize]) {
+        for &node in nodes {
+            let node = &mut self.nodes[node];
+            node.presence = Presence::Both;
+            (node.content, node.right_size) = match node.kind {
+                EntryKind::File { size } => (Some(Content::Same), Some(size)),
+                EntryKind::Directory => (None, None),
+            };
+        }
+        self.recount();
+    }
+
+    /// Records that `nodes`, files on both sides, are gone from `side`, and updates which
+    /// subtrees differ.
+    pub fn mark_removed(&mut self, nodes: &[usize], side: Side) {
+        for &node in nodes {
+            let node = &mut self.nodes[node];
+            debug_assert_eq!(node.presence, Presence::Both);
+            node.presence = Presence::only(side.other());
+            node.content = None;
+            let right_size = node.right_size.take();
+            // `kind` held the left's size; when the left is gone, the right's remains.
+            if side == Side::Left
+                && let (EntryKind::File { size }, Some(right)) = (&mut node.kind, right_size)
+            {
+                *size = right;
+            }
+        }
+        self.recount();
+    }
+
+    /// Recomputes which subtrees differ and the counts after nodes changed in place.
+    fn recount(&mut self) {
         // Children come after their parent, so a reverse pass sees every child first.
         let mut child_differs = vec![false; self.nodes.len()];
         for index in (0..self.nodes.len()).rev() {
             let node = &mut self.nodes[index];
-            node.differs = node.presence != Presence::Both || child_differs[index];
+            node.differs = node.differs_itself() || child_differs[index];
             if let Some(parent) = node.parent {
                 child_differs[parent] |= node.differs;
             }
         }
-        self.missing = Missing::default();
+        self.counts = Counts::default();
         for index in 0..self.nodes.len() {
-            self.missing.count(&self.nodes, index);
+            self.counts.add(&self.nodes, index);
         }
     }
 
-    pub fn missing(&self) -> Missing {
-        self.missing
+    pub fn counts(&self) -> Counts {
+        self.counts
     }
 }
 
@@ -323,24 +442,35 @@ impl Builder<'_> {
                 level.0 = position;
             }
             self.progress.update(&self.levels, self.count);
-            let (presence, entry) = match pair {
-                [Some(entry), Some(_)] => (Presence::Both, entry),
-                [Some(entry), None] => (Presence::LeftOnly, entry),
-                [None, Some(entry)] => (Presence::RightOnly, entry),
+            let (presence, content, right_size, entry) = match pair {
+                [Some(entry), Some(right)] => {
+                    let right_size = match right.kind {
+                        EntryKind::File { size } => Some(size),
+                        EntryKind::Directory => None,
+                    };
+                    let content = Content::of(entry.kind, right.kind);
+                    (Presence::Both, content, right_size, entry)
+                }
+                [Some(entry), None] => (Presence::LeftOnly, None, None, entry),
+                [None, Some(entry)] => (Presence::RightOnly, None, None, entry),
                 [None, None] => unreachable!("every merged key has an entry"),
             };
             let index = self.count;
             self.count += 1;
-            (self.found)(Found::Node(Node {
+            let mut node = Node {
                 name: entry.name,
                 file_name: entry.file_name.clone(),
                 kind: entry.kind,
                 presence,
                 depth,
                 parent,
+                content,
+                right_size,
                 end: index + 1,
-                differs: presence != Presence::Both,
-            }));
+                differs: false,
+            };
+            node.differs = node.differs_itself();
+            (self.found)(Found::Node(node));
             if entry.kind.is_dir() {
                 let present = [Side::Left, Side::Right].map(|side| presence.is_on(side));
                 let children = std::array::from_fn(|side| {
@@ -450,7 +580,9 @@ impl Expansion {
     /// The state after `node` started to differ.
     fn on_difference(self, node: &Node) -> Self {
         match self {
-            Self::Untouched if node.presence == Presence::Both => Self::AutoExpanded,
+            Self::Untouched if node.presence == Presence::Both && node.kind.is_dir() => {
+                Self::AutoExpanded
+            }
             state => state,
         }
     }
@@ -647,7 +779,14 @@ mod tests {
                 (0, "cover", LeftOnly, true),
             ]
         );
-        assert_eq!(diff.missing(), Missing { left: 3, right: 3 });
+        assert_eq!(
+            diff.counts(),
+            Counts {
+                missing: Missing { left: 3, right: 3 },
+                changed: 0,
+                unchecked: 2,
+            }
+        );
         assert!(diff.errors.is_empty());
         Ok(())
     }
@@ -742,7 +881,14 @@ mod tests {
                 outline.rows(),
                 Outline::new(&whole, only_differences).rows()
             );
-            assert_eq!(diff.missing(), Missing { left: 3, right: 3 });
+            assert_eq!(
+                diff.counts(),
+                Counts {
+                    missing: Missing { left: 3, right: 3 },
+                    changed: 0,
+                    unchecked: 2,
+                }
+            );
         }
         Ok(())
     }
@@ -782,11 +928,12 @@ mod tests {
     }
 
     #[test]
-    fn files_of_different_sizes_still_pair_up() -> io::Result<()> {
+    fn files_of_different_sizes_pair_up_as_changed() -> io::Result<()> {
         let temp = tempfile::tempdir()?;
         for (side, contents) in [("left", "short"), ("right", "much longer")] {
-            fs::create_dir(temp.path().join(side))?;
-            fs::write(temp.path().join(side).join("song.mp3"), contents)?;
+            fs::create_dir_all(temp.path().join(side).join("Album"))?;
+            fs::write(temp.path().join(side).join("Album/song.mp3"), contents)?;
+            fs::write(temp.path().join(side).join("Album/same-size.mp3"), "x")?;
         }
 
         let diff = compare(&temp, "left", "right");
@@ -794,9 +941,71 @@ mod tests {
         let nodes = diff
             .nodes
             .iter()
-            .map(|node| (node.name.as_str(), node.presence))
+            .map(|node| {
+                (
+                    node.name.as_str(),
+                    node.presence,
+                    node.content,
+                    node.differs,
+                )
+            })
             .collect::<Vec<_>>();
-        assert_eq!(nodes, [("song.mp3", Presence::Both)]);
+        use Presence::Both;
+        assert_eq!(
+            nodes,
+            [
+                ("Album", Both, None, true),
+                ("same-size.mp3", Both, Some(Content::Unchecked), false),
+                ("song.mp3", Both, Some(Content::Changed), true),
+            ]
+        );
+        assert_eq!((diff.counts().changed, diff.counts().unchecked), (1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn file_removed_from_the_right_becomes_missing_there() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for (side, contents) in [("left", "new version"), ("right", "old")] {
+            fs::create_dir_all(temp.path().join(side).join("Album"))?;
+            fs::write(temp.path().join(side).join("Album/song.mp3"), contents)?;
+        }
+        let mut diff = compare(&temp, "left", "right");
+        assert_eq!((diff.counts().changed, diff.counts().missing.right), (1, 0));
+
+        diff.mark_removed(&[1], Side::Right);
+
+        let song = &diff.nodes[1];
+        assert_eq!((song.presence, song.content), (Presence::LeftOnly, None));
+        assert!(diff.nodes[0].differs);
+        assert_eq!((diff.counts().changed, diff.counts().missing.right), (0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn changed_contents_mark_ancestors_until_one_already_differs() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for side in ["left", "right"] {
+            fs::create_dir_all(temp.path().join(side).join("A/B"))?;
+            fs::write(temp.path().join(side).join("A/B/x.mp3"), "same size")?;
+            fs::write(temp.path().join(side).join("A/y.mp3"), "same size")?;
+        }
+        let mut diff = compare(&temp, "left", "right");
+        let mut outline = Outline::new(&diff, true);
+        assert!(outline.rows().is_empty());
+        let index = |name: &str| diff.nodes.iter().position(|node| node.name == name);
+        let (Some(x), Some(y)) = (index("x.mp3"), index("y.mp3")) else {
+            panic!("fixture lacks files");
+        };
+
+        let started = diff.set_content(x, Content::Changed);
+        outline.grow(&diff, &started);
+
+        assert_eq!(started, [x, x - 1, x - 2]);
+        assert_eq!(outline.rows(), [x - 2, x - 1, x]);
+        // "A" already differs, so only "y.mp3" itself starts to.
+        assert_eq!(diff.set_content(y, Content::Changed), [y]);
+        assert_eq!((diff.counts().changed, diff.counts().unchecked), (2, 0));
         Ok(())
     }
 
