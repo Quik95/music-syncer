@@ -253,3 +253,140 @@ fn connection() -> zbus::Result<Connection> {
     let connection = Connection::session()?;
     Ok(CONNECTION.get_or_init(|| connection).clone())
 }
+
+/// Tests against a real phone, ignored by default: `just test-mtp mtp:/DEVICE/STORAGE/DIR`
+/// runs them in a new folder inside `DIR`, removed afterwards. They run one at a time, as
+/// kmtpd does not tell which transfer a `copyFinished` signal belongs to.
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use anyhow::bail;
+
+    use super::*;
+    use crate::{
+        content::{self, CheckPlan},
+        location::Location,
+        progress::JobProgress,
+        sync::{self, Action, Plan},
+        tree_diff::{Side, TreeDiff},
+    };
+
+    const PHONE: &str = "MUSIC_SYNCER_TEST_MTP";
+
+    /// A new folder for one test inside the folder `PHONE` names, removed with everything
+    /// in it on drop, even when the test fails.
+    struct Scratch(MtpPath);
+
+    impl Scratch {
+        fn new() -> anyhow::Result<Self> {
+            let Ok(url) = std::env::var(PHONE) else {
+                bail!("set {PHONE} to an mtp:/DEVICE/STORAGE/DIR folder for the test");
+            };
+            let Location::Mtp(mut path) = Location::from_uri(&url)? else {
+                bail!("{PHONE} must be an mtp:/ URL, not {url}");
+            };
+            path.dirs
+                .push(format!("music-syncer-test-{}", std::process::id()));
+            ensure!(!exists(&path)?, "{} exists already", path.storage_path());
+            create_dir(&path)?;
+            Ok(Self(path))
+        }
+
+        fn join(&self, names: &[&str]) -> MtpPath {
+            let mut path = self.0.clone();
+            path.dirs
+                .extend(names.iter().map(|name| (*name).to_owned()));
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Err(error) = remove_tree(&self.0) {
+                eprintln!("cannot remove {}: {error:#}", self.0.storage_path());
+            }
+        }
+    }
+
+    fn remove_tree(path: &MtpPath) -> anyhow::Result<()> {
+        for entry in read_dir(path)? {
+            let mut child = path.clone();
+            child.dirs.push(entry.name);
+            if entry.kind.is_dir() {
+                remove_tree(&child)?;
+            } else {
+                delete(&storage(&child)?, &child.storage_path())?;
+            }
+        }
+        delete(&storage(path)?, &path.storage_path())
+    }
+
+    /// Compares the contents of every file still unchecked, downloading them from the phone.
+    fn check_all(diff: &mut TreeDiff) -> anyhow::Result<()> {
+        let mut verdicts = Vec::new();
+        content::execute(
+            &CheckPlan::new(diff, None),
+            &JobProgress::default(),
+            &mut |node, verdict| verdicts.push((node, verdict)),
+        );
+        for (node, verdict) in verdicts {
+            diff.set_content(node, verdict?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "needs a phone over MTP; see the module docs"]
+    fn copy_check_and_overwrite_round_trip() -> anyhow::Result<()> {
+        let scratch = Scratch::new()?;
+        let temp = tempfile::tempdir()?;
+        let album = temp.path().join("Album");
+        fs::create_dir(&album)?;
+        fs::write(album.join("a.mp3"), "version A")?;
+        fs::write(album.join("b.mp3"), "same")?;
+        fs::write(album.join("c.mp3"), "12345")?;
+        let left = Location::local(temp.path().to_path_buf());
+        let right = Location::Mtp(scratch.0.clone());
+
+        let diff = TreeDiff::compare(&left, &right);
+        let to_phone = Action::Copy {
+            target: Side::Right,
+        };
+        let report = sync::execute(&Plan::new(&diff, to_phone, None), &JobProgress::default());
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+
+        // A new size is caught by the walk, new bytes of the same size only by a check.
+        fs::write(album.join("a.mp3"), "version A, retagged")?;
+        fs::write(album.join("c.mp3"), "54321")?;
+        let mut diff = TreeDiff::compare(&left, &right);
+        assert_eq!((diff.counts().changed, diff.counts().unchecked), (1, 2));
+        check_all(&mut diff)?;
+        assert_eq!((diff.counts().changed, diff.counts().unchecked), (2, 0));
+
+        let plan = Plan::new(&diff, Action::Overwrite, None);
+        // Deleted before uploading, so only the 10 bytes "a.mp3" grew by count.
+        assert_eq!((plan.bytes, plan.space), (24, 10));
+        let report = sync::execute(&plan, &JobProgress::default());
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let mut diff = TreeDiff::compare(&left, &right);
+        check_all(&mut diff)?;
+        assert_eq!(diff.counts(), Default::default());
+        let mut names = read_dir(&scratch.join(&["Album"]))?
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["a.mp3", "b.mp3", "c.mp3"], "no leftovers");
+
+        // A replacement whose old version is already gone just uploads.
+        let target = scratch.join(&["Album", "a.mp3"]);
+        delete(&storage(&target)?, &target.storage_path())?;
+        fs::write(album.join("a.mp3"), "version A, third")?;
+        replace_file(&File::open(album.join("a.mp3"))?, &target)?;
+        let mut diff = TreeDiff::compare(&left, &right);
+        check_all(&mut diff)?;
+        assert_eq!(diff.counts(), Default::default());
+        Ok(())
+    }
+}

@@ -17,6 +17,10 @@ lint:
 test *args:
     cargo nextest run --no-tests=warn {{ args }}
 
+# Run the tests that need a phone, in a new folder inside `url` (mtp:/DEVICE/STORAGE/DIR)
+test-mtp url:
+    MUSIC_SYNCER_TEST_MTP={{ quote(url) }} cargo nextest run --run-ignored only --test-threads 1 mtp::tests
+
 # Format Rust and Nix files (git hooks)
 fmt:
     nix fmt
