@@ -1,6 +1,6 @@
 # Music Syncer
 
-Music Syncer is a Linux app for comparing music folders and copying what’s missing from one to the other. Use it with two local folders or with a phone connected over MTP in KDE Plasma.
+Music Syncer is a Linux app for comparing two music folders. It copies missing tracks in either direction and can overwrite changed files. You can use it with two local folders or with a phone connected over MTP in KDE Plasma.
 
 I started this project because I wanted to play around with [GPUI](https://www.gpui.rs/).
 
@@ -24,19 +24,31 @@ You can also click the path at the top of either panel to choose a folder. To br
 
 ## Compare folders
 
-Open the two folders you want to compare and click `Compare trees`. A green row shows an entry that exists on that side only; the red cell opposite it marks where it’s missing. Use `Only differences` to hide matching entries.
+Open the two folders you want to compare and click `Compare trees`. Rows appear as Music Syncer reads both trees. If reading takes a while, a progress toast shows up in the corner without blocking the list, so you can start browsing before it finishes.
 
-![The comparison aligns matching tracks and marks files and folders that exist on only one side](docs/screenshots/comparison.png)
+A green row means an entry exists on that side only, with a red cell opposite it where it’s missing. A yellow row means a file exists on both sides with different contents. Click `Only differences` to hide matching entries.
 
-The comparison walks subfolders and matches entries by name and type. If a file has the same relative path on both sides, Music Syncer treats it as present on both without checking its contents or tags.
+![The comparison aligns matching tracks and marks missing and changed entries](docs/screenshots/comparison.png)
+
+Music Syncer walks subfolders and compares entries by name, type, and size. Files whose sizes differ turn yellow right away, while same-size files stay unchecked until you ask to compare their bytes. The status bar shows how many entries are missing, changed, or unchecked, and only reports that both sides match once the walk finishes with no unreadable folders.
 
 ## Copy missing files
 
-Use `Copy →` or `← Copy` to copy the selected file or the missing items under the selected folder. Use `Copy all missing →` or `← Copy all missing` to fill in the whole tree in that direction. The confirmation shows how many files and folders will be copied, their total size, and the target’s free space when available.
+Use `Copy →` or `← Copy` to copy the selected file or the missing items under the selected folder. `Copy all missing →` and `← Copy all missing` fill in the whole tree in that direction. Before copying, a dialog shows how many files and folders will be copied, their total size, and the target’s free space when available.
 
 ![Confirmation dialog showing the source, destination, and size of a planned copy](docs/screenshots/copy-confirmation.png)
 
-Copying adds missing entries. It leaves files that the comparison found on both sides alone and does not delete anything from either library.
+Music Syncer syncs local copies to disk before reporting them done. Copying only adds missing entries. It leaves existing files alone and never deletes anything from either library.
+
+## Check contents and overwrite changed files
+
+To check same-size files that exist on both sides, click `Check contents` for the selected file or folder, or `Check all contents` for the whole tree. Music Syncer compares them byte by byte in the background, updates each row as it finishes, and shows a progress toast with a `Stop` button.
+
+To replace changed files on the right with the version from the left, click `Overwrite →` for the selected entry or folder, or `Overwrite all changed →` for the whole tree. The confirmation dialog checks free space against the peak growth of the target as files are replaced one by one.
+
+![Confirmation dialog for overwriting changed files on the right after checking contents](docs/screenshots/overwrite-confirmation.png)
+
+Local overwrites write to a temporary file, sync it to disk, and rename it into place. Over MTP, Music Syncer deletes the old file before uploading the replacement. If an upload fails, it removes the incomplete file and marks the entry as missing on the right so you can copy it again.
 
 ## Development
 
@@ -45,4 +57,8 @@ nix develop
 just run
 ```
 
-Use `just test` to run the tests or `just check` to run the flake checks.
+Use `just test` to run the tests or `just check` to run the flake checks. To run the opt-in MTP round-trip test against a connected phone, pass a folder on the phone (the test creates a temporary subfolder and removes it afterward):
+
+```sh
+just test-mtp mtp:/DEVICE/STORAGE/DIR
+```
