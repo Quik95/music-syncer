@@ -244,7 +244,10 @@ fn exists(location: &Location) -> anyhow::Result<bool> {
 
 fn create_dir(target: &Location) -> anyhow::Result<()> {
     match target {
-        Location::Local(path) => Ok(fs::create_dir(path)?),
+        Location::Local(path) => {
+            fs::create_dir(path)?;
+            sync_parent(path)
+        }
         Location::Mtp(path) => mtp::create_dir(path),
     }
 }
@@ -274,7 +277,8 @@ fn send(source: &File, target: &MtpPath, replace: bool) -> anyhow::Result<()> {
 
 /// Writes next to `target` under a hidden name and renames it at the end, so an
 /// interrupted copy never looks like a complete file, and a replaced file stays intact
-/// until its new version is complete. The rename is atomic, which MTP lacks.
+/// until its new version is complete. The rename is atomic, which MTP lacks. Data and
+/// rename are synced to disk before this returns, so a crash cannot undo a reported copy.
 fn copy_to_local(source: &Location, target: &Path, replace: bool) -> anyhow::Result<()> {
     ensure!(replace || !fs::exists(target)?, "already exists");
     let part = part_path(target)?;
@@ -282,20 +286,32 @@ fn copy_to_local(source: &Location, target: &Path, replace: bool) -> anyhow::Res
     if result.is_err() {
         _ = fs::remove_file(&part);
     }
-    result
+    result?;
+    sync_parent(target)
 }
 
 fn write_local(source: &Location, part: &Path) -> anyhow::Result<()> {
-    match source {
+    let file = match source {
         Location::Local(source) => {
             fs::copy(source, part)?;
+            File::open(part)?
         }
         Location::Mtp(source) => {
             let file = File::create(part)?;
             mtp::receive_file(source, &file)?;
-            file.sync_all()?;
+            file
         }
-    }
+    };
+    // On disk before the rename makes it look complete.
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Makes the entry `path` just got in its directory, by creation or rename, survive a
+/// crash.
+fn sync_parent(path: &Path) -> anyhow::Result<()> {
+    let parent = path.parent().context("no parent directory")?;
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
