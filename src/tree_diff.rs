@@ -89,13 +89,33 @@ pub struct TreeDiff {
     roots: [Location; 2],
     pub nodes: Vec<Node>,
     pub errors: Vec<ReadError>,
+    /// Kept up to date as nodes are added or copied, so reading it costs nothing.
+    missing: Missing,
 }
 
 /// Entries present on one side only, counting a one-sided directory once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Missing {
     pub left: usize,
     pub right: usize,
+}
+
+impl Missing {
+    /// Counts `node` when it is one-sided and its parent, if any, is on both sides.
+    fn count(&mut self, nodes: &[Node], node: usize) {
+        let node = &nodes[node];
+        if node
+            .parent
+            .is_some_and(|parent| nodes[parent].presence != Presence::Both)
+        {
+            return;
+        }
+        match node.presence {
+            Presence::Both => {}
+            Presence::LeftOnly => self.right += 1,
+            Presence::RightOnly => self.left += 1,
+        }
+    }
 }
 
 /// How far a running [`TreeDiff::compare`] got, readable from other threads.
@@ -136,26 +156,84 @@ impl Progress {
     }
 }
 
+/// Something a running [`walk`] found, in the order it found it.
+#[derive(Debug)]
+pub enum Found {
+    /// The next node in pre-order; its subtree follows.
+    Node(Node),
+    Error(ReadError),
+}
+
+/// Reads both trees fully, passing every node and error to `found` as soon as it is
+/// known and reporting to `progress`; local symlinked directories are followed unless they
+/// lead back to a directory being compared above them. [`TreeDiff::extend`] collects the
+/// results.
+pub fn walk(left: &Location, right: &Location, progress: &Progress, found: &mut dyn FnMut(Found)) {
+    let mut builder = Builder {
+        found,
+        count: 0,
+        levels: Vec::new(),
+        progress,
+    };
+    let mut ancestors = [Vec::new(), Vec::new()];
+    let roots = [left, right].map(|root| Some(root.clone()));
+    let roots = builder.enter(roots, &mut ancestors);
+    builder.add_children(&roots, None, 0, &mut ancestors);
+    progress.update(&[(1, 1)], builder.count);
+}
+
 impl TreeDiff {
-    /// Reads both trees fully, reporting to `progress`; local symlinked directories are
-    /// followed unless they lead back to a directory being compared above them.
-    pub fn compare(left: &Location, right: &Location, progress: &Progress) -> Self {
-        let mut builder = Builder {
+    /// Comparison of `left` and `right` with nothing found yet.
+    pub fn new(left: Location, right: Location) -> Self {
+        Self {
+            roots: [left, right],
             nodes: Vec::new(),
             errors: Vec::new(),
-            levels: Vec::new(),
-            progress,
-        };
-        let mut ancestors = [Vec::new(), Vec::new()];
-        let roots = [left, right].map(|root| Some(root.clone()));
-        let roots = builder.enter(roots, &mut ancestors);
-        builder.add_children(&roots, None, 0, &mut ancestors);
-        progress.update(&[(1, 1)], builder.nodes.len());
-        Self {
-            roots: [left.clone(), right.clone()],
-            nodes: builder.nodes,
-            errors: builder.errors,
+            missing: Missing::default(),
         }
+    }
+
+    /// Walks both trees fully.
+    #[cfg(test)]
+    pub fn compare(left: &Location, right: &Location) -> Self {
+        let mut found = Vec::new();
+        walk(left, right, &Progress::default(), &mut |item| {
+            found.push(item)
+        });
+        let mut diff = Self::new(left.clone(), right.clone());
+        diff.extend(found);
+        diff
+    }
+
+    /// Adds what a [`walk`] found next, extending the subtrees and differences of the
+    /// ancestors of new nodes. Returns the nodes, old or new, that started to differ.
+    pub fn extend(&mut self, found: impl IntoIterator<Item = Found>) -> Vec<usize> {
+        let mut started_differing = Vec::new();
+        for item in found {
+            let node = match item {
+                Found::Node(node) => node,
+                Found::Error(error) => {
+                    self.errors.push(error);
+                    continue;
+                }
+            };
+            let index = self.nodes.len();
+            debug_assert!(node.parent.is_none_or(|parent| parent < index));
+            let differs = node.differs;
+            let mut parent = node.parent;
+            self.nodes.push(node);
+            self.missing.count(&self.nodes, index);
+            while let Some(index_above) = parent {
+                let ancestor = &mut self.nodes[index_above];
+                ancestor.end = index + 1;
+                if differs && !ancestor.differs {
+                    ancestor.differs = true;
+                    started_differing.push(index_above);
+                }
+                parent = ancestor.parent;
+            }
+        }
+        started_differing
     }
 
     pub fn has_children(&self, node: usize) -> bool {
@@ -196,42 +274,35 @@ impl TreeDiff {
                 child_differs[parent] |= node.differs;
             }
         }
+        self.missing = Missing::default();
+        for index in 0..self.nodes.len() {
+            self.missing.count(&self.nodes, index);
+        }
     }
 
     pub fn missing(&self) -> Missing {
-        let mut missing = Missing { left: 0, right: 0 };
-        let topmost = self.nodes.iter().filter(|node| {
-            node.parent
-                .is_none_or(|parent| self.nodes[parent].presence == Presence::Both)
-        });
-        for node in topmost {
-            match node.presence {
-                Presence::Both => {}
-                Presence::LeftOnly => missing.right += 1,
-                Presence::RightOnly => missing.left += 1,
-            }
-        }
-        missing
+        self.missing
     }
 }
 
 struct Builder<'a> {
-    nodes: Vec<Node>,
-    errors: Vec<ReadError>,
+    found: &'a mut dyn FnMut(Found),
+    /// Nodes found so far; the next one gets this index.
+    count: usize,
     /// Position in each directory being walked, root first; see [`Progress::update`].
     levels: Vec<(usize, usize)>,
     progress: &'a Progress,
 }
 
 impl Builder<'_> {
-    /// Children of `dirs`, merged by name. Returns whether any of them differs.
+    /// Children of `dirs`, merged by name.
     fn add_children(
         &mut self,
         dirs: &[Option<Location>; 2],
         parent: Option<usize>,
         depth: usize,
         ancestors: &mut [Vec<PathBuf>; 2],
-    ) -> bool {
+    ) {
         let mut merged = BTreeMap::<SortKey, [Option<Entry>; 2]>::new();
         for (side, dir) in dirs.iter().enumerate() {
             let Some(dir) = dir else { continue };
@@ -246,21 +317,21 @@ impl Builder<'_> {
             }
         }
 
-        let mut differs = false;
         self.levels.push((0, merged.len()));
         for (position, pair) in merged.into_values().enumerate() {
             if let Some(level) = self.levels.last_mut() {
                 level.0 = position;
             }
-            self.progress.update(&self.levels, self.nodes.len());
+            self.progress.update(&self.levels, self.count);
             let (presence, entry) = match pair {
                 [Some(entry), Some(_)] => (Presence::Both, entry),
                 [Some(entry), None] => (Presence::LeftOnly, entry),
                 [None, Some(entry)] => (Presence::RightOnly, entry),
                 [None, None] => unreachable!("every merged key has an entry"),
             };
-            let index = self.nodes.len();
-            self.nodes.push(Node {
+            let index = self.count;
+            self.count += 1;
+            (self.found)(Found::Node(Node {
                 name: entry.name,
                 file_name: entry.file_name.clone(),
                 kind: entry.kind,
@@ -269,7 +340,7 @@ impl Builder<'_> {
                 parent,
                 end: index + 1,
                 differs: presence != Presence::Both,
-            });
+            }));
             if entry.kind.is_dir() {
                 let present = [Side::Left, Side::Right].map(|side| presence.is_on(side));
                 let children = std::array::from_fn(|side| {
@@ -279,7 +350,7 @@ impl Builder<'_> {
                         .map(|dir| dir.join(&entry.file_name))
                 });
                 let children = self.enter(children, ancestors);
-                let child_differs = self.add_children(&children, Some(index), depth + 1, ancestors);
+                self.add_children(&children, Some(index), depth + 1, ancestors);
                 for (side, child) in children.iter().enumerate() {
                     if child
                         .as_ref()
@@ -288,15 +359,9 @@ impl Builder<'_> {
                         ancestors[side].pop();
                     }
                 }
-                let end = self.nodes.len();
-                let node = &mut self.nodes[index];
-                node.end = end;
-                node.differs |= child_differs;
             }
-            differs |= self.nodes[index].differs;
         }
         self.levels.pop();
-        differs
     }
 
     /// Records each local directory as an ancestor on its side. A local directory that
@@ -318,10 +383,10 @@ impl Builder<'_> {
             match fs::canonicalize(local) {
                 Ok(real) if ancestors.contains(&real) => {
                     tracing::warn!(path = %dir, target = %real.display(), "symlink loop");
-                    self.errors.push(ReadError {
+                    (self.found)(Found::Error(ReadError {
                         message: format!("symlink loop back to {}", real.display()),
                         path: dir,
-                    });
+                    }));
                     None
                 }
                 Ok(real) => {
@@ -338,10 +403,10 @@ impl Builder<'_> {
 
     fn error(&mut self, path: &Location, error: &io::Error) {
         tracing::warn!(%path, %error, "cannot compare directory");
-        self.errors.push(ReadError {
+        (self.found)(Found::Error(ReadError {
             path: path.clone(),
             message: error.to_string(),
-        });
+        }));
     }
 }
 
@@ -349,27 +414,93 @@ impl Builder<'_> {
 /// are hidden, and the nodes that are therefore visible.
 #[derive(Debug)]
 pub struct Outline {
-    expanded: Vec<bool>,
+    expansions: Vec<Expansion>,
     only_differences: bool,
     rows: Vec<usize>,
+}
+
+/// Whether a node is expanded and who decided it. The only automatic step is
+/// `Untouched` → `AutoExpanded` when a directory present on both sides starts to differ;
+/// toggling by the user moves any state to `UserExpanded` or `UserCollapsed`, which later
+/// differences leave alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expansion {
+    Untouched,
+    AutoExpanded,
+    UserExpanded,
+    UserCollapsed,
+}
+
+impl Expansion {
+    fn is_expanded(self) -> bool {
+        match self {
+            Self::AutoExpanded | Self::UserExpanded => true,
+            Self::Untouched | Self::UserCollapsed => false,
+        }
+    }
+
+    fn user(expanded: bool) -> Self {
+        if expanded {
+            Self::UserExpanded
+        } else {
+            Self::UserCollapsed
+        }
+    }
+
+    /// The state after `node` started to differ.
+    fn on_difference(self, node: &Node) -> Self {
+        match self {
+            Self::Untouched if node.presence == Presence::Both => Self::AutoExpanded,
+            state => state,
+        }
+    }
 }
 
 impl Outline {
     /// Expands the directories present on both sides that differ, so every difference is
     /// visible except the contents of one-sided directories.
     pub fn new(diff: &TreeDiff, only_differences: bool) -> Self {
-        let expanded = diff
+        let expansions = diff
             .nodes
             .iter()
-            .map(|node| node.presence == Presence::Both && node.differs)
+            .map(|node| {
+                if node.differs {
+                    Expansion::Untouched.on_difference(node)
+                } else {
+                    Expansion::Untouched
+                }
+            })
             .collect();
         let mut outline = Self {
-            expanded,
+            expansions,
             only_differences,
             rows: Vec::new(),
         };
         outline.refresh(diff);
         outline
+    }
+
+    /// Takes in the nodes [`TreeDiff::extend`] added, untouched, and moves the nodes it
+    /// returned in `started_differing` along; once the walk is done, the untouched part
+    /// matches [`Self::new`].
+    ///
+    /// Rows of earlier nodes are kept: new nodes come last in pre-order, and an earlier
+    /// node can only appear or show its children when it started to differ and then
+    /// expanded or passed the differences filter. Rows are recomputed from the first such
+    /// node, or from the first new node.
+    pub fn grow(&mut self, diff: &TreeDiff, started_differing: &[usize]) {
+        let added_from = self.expansions.len();
+        self.expansions
+            .resize(diff.nodes.len(), Expansion::Untouched);
+        let mut changed_from = added_from;
+        for &node in started_differing {
+            let before = self.expansions[node];
+            self.expansions[node] = before.on_difference(&diff.nodes[node]);
+            if node < added_from && (self.expansions[node] != before || self.only_differences) {
+                changed_from = changed_from.min(node);
+            }
+        }
+        self.refresh_from(diff, changed_from);
     }
 
     pub fn only_differences(&self) -> bool {
@@ -403,27 +534,45 @@ impl Outline {
     }
 
     pub fn is_expanded(&self, node: usize) -> bool {
-        self.expanded[node]
+        self.expansions[node].is_expanded()
     }
 
+    /// Expands or collapses `node` as the user's choice, which later differences keep.
     pub fn set_expanded(&mut self, diff: &TreeDiff, node: usize, expanded: bool) {
-        if self.expanded[node] != expanded {
-            self.expanded[node] = expanded;
+        let changed = self.is_expanded(node) != expanded;
+        self.expansions[node] = Expansion::user(expanded);
+        if changed {
             self.refresh(diff);
         }
     }
 
     /// Recomputes the visible rows, needed after the presence of nodes changed.
     pub fn refresh(&mut self, diff: &TreeDiff) {
-        self.rows.clear();
-        let mut index = 0;
+        self.refresh_from(diff, 0);
+    }
+
+    /// Recomputes the rows of nodes from `start` on, keeping the ones before it.
+    fn refresh_from(&mut self, diff: &TreeDiff, start: usize) {
+        let kept = self.rows.partition_point(|&row| row < start);
+        self.rows.truncate(kept);
+        // Past the topmost ancestor hiding `start`, every step below stays on nodes whose
+        // ancestors are all shown and expanded.
+        let mut index = start;
+        let mut ancestor = diff.nodes.get(start).and_then(|node| node.parent);
+        while let Some(above) = ancestor {
+            let node = &diff.nodes[above];
+            if !self.is_expanded(above) || (self.only_differences && !node.differs) {
+                index = node.end;
+            }
+            ancestor = node.parent;
+        }
         while let Some(node) = diff.nodes.get(index) {
             if self.only_differences && !node.differs {
                 index = node.end;
                 continue;
             }
             self.rows.push(index);
-            index = if self.expanded[index] {
+            index = if self.is_expanded(index) {
                 index + 1
             } else {
                 node.end
@@ -438,7 +587,7 @@ mod tests {
 
     fn compare(temp: &tempfile::TempDir, left: &str, right: &str) -> TreeDiff {
         let side = |name| Location::local(temp.path().join(name));
-        TreeDiff::compare(&side(left), &side(right), &Progress::default())
+        TreeDiff::compare(&side(left), &side(right))
     }
 
     fn fixture() -> io::Result<tempfile::TempDir> {
@@ -551,6 +700,84 @@ mod tests {
         );
         // "01.flac" is equal on both sides, so "CD1" stands in for it.
         assert_eq!(outline.nearest_row(2), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn growing_one_node_at_a_time_ends_like_the_whole_comparison() -> io::Result<()> {
+        let temp = fixture()?;
+        let whole = compare(&temp, "left", "right");
+        let side = |name| Location::local(temp.path().join(name));
+        let shape = |diff: &TreeDiff| {
+            diff.nodes
+                .iter()
+                .map(|node| (node.end, node.differs))
+                .collect::<Vec<_>>()
+        };
+
+        for only_differences in [false, true] {
+            let mut found = Vec::new();
+            walk(
+                &side("left"),
+                &side("right"),
+                &Progress::default(),
+                &mut |item| {
+                    found.push(item);
+                },
+            );
+            let mut diff = TreeDiff::new(side("left"), side("right"));
+            let mut outline = Outline::new(&diff, only_differences);
+
+            for item in found {
+                let started_differing = diff.extend([item]);
+                outline.grow(&diff, &started_differing);
+                // Every intermediate state matches a full recomputation.
+                let rows = outline.rows().to_vec();
+                outline.refresh(&diff);
+                assert_eq!(rows, outline.rows());
+            }
+
+            assert_eq!(shape(&diff), shape(&whole));
+            assert_eq!(
+                outline.rows(),
+                Outline::new(&whole, only_differences).rows()
+            );
+            assert_eq!(diff.missing(), Missing { left: 3, right: 3 });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn later_difference_keeps_a_directory_the_user_collapsed() -> io::Result<()> {
+        let temp = fixture()?;
+        let side = |name| Location::local(temp.path().join(name));
+        let mut found = Vec::new();
+        walk(
+            &side("left"),
+            &side("right"),
+            &Progress::default(),
+            &mut |item| {
+                found.push(item);
+            },
+        );
+        let mut diff = TreeDiff::new(side("left"), side("right"));
+        let mut outline = Outline::new(&diff, false);
+        let mut found = found.into_iter();
+
+        // "Album", "CD1" and "01.flac" match so far.
+        let started_differing = diff.extend(found.by_ref().take(3));
+        outline.grow(&diff, &started_differing);
+        assert!(!diff.nodes[0].differs);
+        outline.set_expanded(&diff, 0, true);
+        outline.set_expanded(&diff, 0, false);
+
+        // "02.flac" makes "Album" and the untouched "CD1" differ.
+        let started_differing = diff.extend(found);
+        outline.grow(&diff, &started_differing);
+
+        assert!(diff.nodes[0].differs);
+        assert!(!outline.is_expanded(0));
+        assert!(outline.is_expanded(1));
         Ok(())
     }
 

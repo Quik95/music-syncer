@@ -1,9 +1,14 @@
-use std::{ops::Range, sync::Arc, time::Duration};
+use std::{
+    mem,
+    ops::Range,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    AnyElement, App, AsyncApp, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton, Rgba,
-    ScrollStrategy, SharedString, Task, UniformListScrollHandle, WeakEntity, Window, actions, div,
-    prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton, Rgba,
+    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
+    px, uniform_list,
 };
 
 use super::{
@@ -16,7 +21,7 @@ use crate::{
     listing::EntryKind,
     location::Location,
     sync::{self, CopyProgress, Plan, Report},
-    tree_diff::{Node, Outline, Presence, Progress, Side, TreeDiff},
+    tree_diff::{self, Found, Node, Outline, Presence, Progress, Side, TreeDiff},
 };
 
 pub const KEY_CONTEXT: &str = "TreeCompare";
@@ -43,26 +48,26 @@ const PROGRESS_REFRESH: Duration = Duration::from_millis(100);
 pub struct TreeCompare {
     left_title: SharedString,
     right_title: SharedString,
-    state: State,
+    comparison: Comparison,
+    /// Set while the trees are still being read.
+    comparing: Option<Comparing>,
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
     copy: Option<Copy>,
     /// Outcome of the last copy, shown in the status bar.
     notice: Option<SharedString>,
     _compare: Task<()>,
-    _show_progress: Task<()>,
+    _refresh: Task<()>,
 }
 
-enum State {
-    /// The progress bar is `visible` only once the comparison takes longer than
-    /// [`PROGRESS_DELAY`], so quick ones do not flash it. `only_differences` is the
-    /// filter to apply once the outline exists, which then owns it.
-    Comparing {
-        progress: Arc<Progress>,
-        visible: bool,
-        only_differences: bool,
-    },
-    Ready(Box<Comparison>),
+/// Trees being read in the background. Rows show up as entries are found; the toast with
+/// the progress appears only once reading takes longer than [`PROGRESS_DELAY`], so quick
+/// comparisons do not flash it.
+struct Comparing {
+    started: Instant,
+    progress: Arc<Progress>,
+    /// Found by the walk and not yet added to the comparison.
+    found: Arc<Mutex<Vec<Found>>>,
 }
 
 struct Comparison {
@@ -107,47 +112,54 @@ impl Drop for CopyJob {
 }
 
 impl TreeCompare {
-    /// Reads both trees in the background.
+    /// Reads both trees in the background, showing entries as they are found.
     pub fn new(left: Location, right: Location, cx: &mut Context<Self>) -> Self {
         let left_title = left.to_string().into();
         let right_title = right.to_string().into();
         let progress = Arc::new(Progress::default());
+        let found = Arc::new(Mutex::new(Vec::new()));
         let compare = cx.spawn({
-            let progress = progress.clone();
+            let (left, right) = (left.clone(), right.clone());
+            let (progress, found) = (progress.clone(), found.clone());
             async move |this, cx| {
                 tracing::info!(%left, %right, "comparing trees");
-                let diff = cx
-                    .background_executor()
-                    .spawn(async move { TreeDiff::compare(&left, &right, &progress) })
+                cx.background_executor()
+                    .spawn(async move {
+                        tree_diff::walk(&left, &right, &progress, &mut |item| {
+                            if let Ok(mut found) = found.lock() {
+                                found.push(item);
+                            }
+                        });
+                    })
                     .await;
-                Self::finish(this, diff, cx);
+                _ = this.update(cx, |this, cx| this.finish(cx));
             }
         });
-        // Also redraws while the bar is shown, since its animation pauses when the
-        // desktop asks for reduced motion.
-        let show_progress = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PROGRESS_DELAY).await;
-            while let Ok(true) = this.update(cx, |this, cx| {
-                let State::Comparing { visible, .. } = &mut this.state else {
-                    return false;
-                };
-                *visible = true;
-                cx.notify();
-                true
-            }) {
+        // Redraws on every tick, not only when entries were found, as the toast's
+        // animation pauses when the desktop asks for reduced motion.
+        let refresh = cx.spawn(async move |this, cx| {
+            while let Ok(true) = this.update(cx, |this, cx| this.take_found(cx)) {
                 cx.background_executor().timer(PROGRESS_REFRESH).await;
             }
         });
+        let diff = TreeDiff::new(left, right);
+        let outline = Outline::new(&diff, false);
         Self {
             left_title,
             right_title,
-            state: State::Comparing {
-                progress,
-                visible: false,
-                only_differences: false,
+            comparison: Comparison {
+                summary: summary(&diff, false),
+                cursor: Cursor::new(outline.rows().len()),
+                diff,
+                outline,
             },
+            comparing: Some(Comparing {
+                started: Instant::now(),
+                progress,
+                found,
+            }),
             _compare: compare,
-            _show_progress: show_progress,
+            _refresh: refresh,
             copy: None,
             notice: None,
             scroll: UniformListScrollHandle::new(),
@@ -155,61 +167,66 @@ impl TreeCompare {
         }
     }
 
-    fn finish(this: WeakEntity<Self>, diff: TreeDiff, cx: &mut AsyncApp) {
+    /// Adds the entries the walk found since the last call, keeping the active entry
+    /// without scrolling. Returns whether the walk still runs.
+    fn take_found(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(comparing) = &self.comparing else {
+            return false;
+        };
+        let found = comparing
+            .found
+            .lock()
+            .map(|mut found| mem::take(&mut *found))
+            .unwrap_or_default();
+        if !found.is_empty() {
+            let active = self.active_node();
+            let comparison = &mut self.comparison;
+            let started_differing = comparison.diff.extend(found);
+            comparison
+                .outline
+                .grow(&comparison.diff, &started_differing);
+            comparison.summary = summary(&comparison.diff, false);
+            self.reselect(active);
+        }
+        cx.notify();
+        true
+    }
+
+    fn finish(&mut self, cx: &mut Context<Self>) {
+        self.take_found(cx);
+        self.comparing = None;
+        self.comparison.summary = summary(&self.comparison.diff, true);
         tracing::info!(
-            nodes = diff.nodes.len(),
-            errors = diff.errors.len(),
+            nodes = self.comparison.diff.nodes.len(),
+            errors = self.comparison.diff.errors.len(),
             "trees compared"
         );
-        _ = this.update(cx, |this, cx| {
-            let outline = Outline::new(&diff, this.only_differences());
-            let cursor = Cursor::new(outline.rows().len());
-            this.state = State::Ready(Box::new(Comparison {
-                summary: summary(&diff),
-                diff,
-                outline,
-                cursor,
-            }));
-            cx.notify();
-        });
+        cx.notify();
     }
 
     pub fn only_differences(&self) -> bool {
-        match &self.state {
-            State::Comparing {
-                only_differences, ..
-            } => *only_differences,
-            State::Ready(comparison) => comparison.outline.only_differences(),
-        }
+        self.comparison.outline.only_differences()
     }
 
     /// Shows only entries missing on a side and directories containing such entries.
     /// The active entry stays active, or the nearest visible one above it when hidden.
     pub fn set_only_differences(&mut self, only_differences: bool, cx: &mut Context<Self>) {
         let active = self.active_node();
-        match &mut self.state {
-            State::Comparing {
-                only_differences: pending,
-                ..
-            } => *pending = only_differences,
-            State::Ready(comparison) => {
-                comparison
-                    .outline
-                    .set_only_differences(&comparison.diff, only_differences);
-                self.keep_active(active);
-            }
-        }
+        let comparison = &mut self.comparison;
+        comparison
+            .outline
+            .set_only_differences(&comparison.diff, only_differences);
+        self.keep_active(active);
         cx.notify();
     }
 
-    /// Whether [`Self::request_copy`] would find anything to copy right now.
+    /// Whether [`Self::request_copy`] would find anything to copy right now. Nothing can
+    /// be copied before the comparison is complete.
     pub fn can_copy(&self, scope: CopyScope, target: Side) -> bool {
-        let State::Ready(comparison) = &self.state else {
-            return false;
-        };
-        if self.copy.is_some() {
+        if self.comparing.is_some() || self.copy.is_some() {
             return false;
         }
+        let comparison = &self.comparison;
         match scope {
             CopyScope::All => sync::has_work(&comparison.diff, None, target),
             CopyScope::Active => comparison.cursor.index().is_some_and(|row| {
@@ -231,9 +248,7 @@ impl TreeCompare {
             return;
         }
         let active = self.active_node();
-        let Some(comparison) = self.comparison() else {
-            return;
-        };
+        let comparison = &self.comparison;
         let scope = match scope {
             CopyScope::All => None,
             CopyScope::Active => active,
@@ -298,12 +313,11 @@ impl TreeCompare {
             "copy finished"
         );
         let active = self.active_node();
-        if let Some(comparison) = self.comparison() {
-            comparison.diff.mark_on_both(&report.copied);
-            comparison.outline.refresh(&comparison.diff);
-            comparison.summary = summary(&comparison.diff);
-            self.keep_active(active);
-        }
+        let comparison = &mut self.comparison;
+        comparison.diff.mark_on_both(&report.copied);
+        comparison.outline.refresh(&comparison.diff);
+        comparison.summary = summary(&comparison.diff, true);
+        self.keep_active(active);
         self.notice = Some(copy_notice(report).into());
         cx.notify();
     }
@@ -317,32 +331,27 @@ impl TreeCompare {
         cx.notify();
     }
 
-    /// Selects `node` again after the rows changed, or the nearest visible row above it.
+    /// [`Self::reselect`], scrolling `node` into view.
     fn keep_active(&mut self, node: Option<usize>) {
-        let Some(comparison) = self.comparison() else {
-            return;
-        };
-        let len = comparison.outline.rows().len();
-        comparison.cursor = Cursor::new(len);
-        if let Some(row) = node.and_then(|node| comparison.outline.nearest_row(node)) {
-            comparison.cursor.select(row, len);
+        if let Some(row) = self.reselect(node) {
             self.scroll.scroll_to_item(row, ScrollStrategy::Center);
         }
     }
 
-    fn comparison(&mut self) -> Option<&mut Comparison> {
-        match &mut self.state {
-            State::Ready(comparison) => Some(comparison),
-            State::Comparing { .. } => None,
-        }
+    /// Selects `node` again after the rows changed, or the nearest visible row above it;
+    /// the first row when there was no active entry. Returns the row selected for `node`.
+    fn reselect(&mut self, node: Option<usize>) -> Option<usize> {
+        let comparison = &mut self.comparison;
+        let len = comparison.outline.rows().len();
+        comparison.cursor = Cursor::new(len);
+        let row = comparison.outline.nearest_row(node?)?;
+        comparison.cursor.select(row, len);
+        Some(row)
     }
 
     /// Browsing is blocked while a copy is being confirmed or runs.
     fn browsable(&mut self) -> Option<&mut Comparison> {
-        if self.copy.is_some() {
-            return None;
-        }
-        self.comparison()
+        self.copy.is_none().then_some(&mut self.comparison)
     }
 
     fn move_cursor(&mut self, step: Move, cx: &mut Context<Self>) {
@@ -370,9 +379,7 @@ impl TreeCompare {
     }
 
     fn select_node(&mut self, node: usize) {
-        let Some(comparison) = self.comparison() else {
-            return;
-        };
+        let comparison = &mut self.comparison;
         if let Some(row) = comparison.outline.row_of(node) {
             comparison
                 .cursor
@@ -381,8 +388,8 @@ impl TreeCompare {
         }
     }
 
-    fn active_node(&mut self) -> Option<usize> {
-        let comparison = self.comparison()?;
+    fn active_node(&self) -> Option<usize> {
+        let comparison = &self.comparison;
         let row = comparison.cursor.index()?;
         Some(comparison.outline.rows()[row])
     }
@@ -460,32 +467,19 @@ impl TreeCompare {
     }
 
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let comparison = match &self.state {
-            State::Comparing {
-                progress, visible, ..
-            } => {
-                return if *visible {
-                    centered_progress(
-                        progress.fraction(),
-                        format!("Comparing… {} entries", progress.entries()),
-                    )
-                    .into_any_element()
-                } else {
-                    div().into_any_element()
-                };
+        let comparison = &self.comparison;
+        if comparison.outline.rows().is_empty() {
+            return match self.comparing {
+                Some(_) => div(),
+                None => div().px_2().child("(both empty)"),
             }
-            State::Ready(comparison) if comparison.outline.rows().is_empty() => {
-                return div().px_2().child("(both empty)").into_any_element();
-            }
-            State::Ready(comparison) => comparison,
-        };
+            .into_any_element();
+        }
         let list = uniform_list(
             "rows",
             comparison.outline.rows().len(),
             cx.processor(|this, range: Range<usize>, window, cx| {
-                let State::Ready(comparison) = &this.state else {
-                    return Vec::new();
-                };
+                let comparison = &this.comparison;
                 let active = comparison.cursor.index();
                 let active_bg = if this.focus_handle.is_focused(window) {
                     *theme::ROW_ACTIVE
@@ -671,17 +665,31 @@ fn cell(node: &Node, disclosure: Option<&'static str>, side: Side, active_bg: Op
         .child(div().min_w_0().truncate().child(name))
 }
 
-/// A progress bar with a caption, centered in the list area.
-fn centered_progress(fraction: f32, caption: String) -> impl IntoElement {
+/// How far reading the trees got, in the bottom right corner of the list area, which must
+/// be `relative`. Covers only itself, so the rows found so far stay usable.
+fn progress_toast(comparing: &Comparing) -> Div {
+    let progress = &comparing.progress;
     div()
-        .size_full()
+        .absolute()
+        .bottom_2()
+        .right(scrollbar::WIDTH + px(8.))
+        .occlude()
         .flex()
         .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(progress_bar(fraction))
-        .child(div().text_color(*theme::TEXT_MUTED).child(caption))
+        .gap_1()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(*theme::BORDER)
+        .bg(*theme::HEADER_BACKGROUND)
+        .shadow_lg()
+        .child("Comparing trees…")
+        .child(progress_bar(progress.fraction()))
+        .child(
+            div()
+                .text_color(*theme::TEXT_MUTED)
+                .child(format!("{} entries found", progress.entries())),
+        )
 }
 
 fn side_name(side: Side) -> &'static str {
@@ -724,15 +732,23 @@ fn copy_notice(report: &Report) -> String {
     notice
 }
 
-fn summary(diff: &TreeDiff) -> SharedString {
+/// Differences found in `diff`. Equality is claimed only once the walk is `complete` and
+/// every directory could be read; before that the counts are marked provisional.
+fn summary(diff: &TreeDiff, complete: bool) -> SharedString {
     let missing = diff.missing();
-    let mut summary = if missing.left == 0 && missing.right == 0 {
-        "Same entries on both sides".to_owned()
-    } else {
-        format!(
+    let same = missing.left == 0 && missing.right == 0;
+    let mut summary = match (complete, same) {
+        (true, true) if diff.errors.is_empty() => "Same entries on both sides".to_owned(),
+        (true, true) => "No differences found among readable entries".to_owned(),
+        (true, false) => format!(
             "Missing on the left: {} · Missing on the right: {}",
             missing.left, missing.right
-        )
+        ),
+        (false, true) => "Comparing… no differences so far".to_owned(),
+        (false, false) => format!(
+            "Comparing… missing so far on the left: {} · on the right: {}",
+            missing.left, missing.right
+        ),
     };
     if let Some(first) = diff.errors.first() {
         summary += &format!(
@@ -753,10 +769,7 @@ impl Focusable for TreeCompare {
 
 impl Render for TreeCompare {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = |this: &Self| match &this.state {
-            State::Ready(comparison) => page_rows(&this.scroll, comparison.outline.rows().len()),
-            State::Comparing { .. } => 1,
-        };
+        let page = |this: &Self| page_rows(&this.scroll, this.comparison.outline.rows().len());
         let header = |title: SharedString| {
             div()
                 .flex_1()
@@ -766,13 +779,16 @@ impl Render for TreeCompare {
                 .truncate()
                 .child(title)
         };
-        let status: SharedString = match (&self.state, &self.notice) {
-            (State::Ready(comparison), Some(notice)) => {
-                format!("{notice} · {}", comparison.summary).into()
-            }
-            (State::Ready(comparison), None) => comparison.summary.clone(),
-            (State::Comparing { .. }, _) => SharedString::new_static(""),
+        let summary = &self.comparison.summary;
+        let status: SharedString = match &self.notice {
+            Some(notice) => format!("{notice} · {summary}").into(),
+            None => summary.clone(),
         };
+        let toast = self
+            .comparing
+            .as_ref()
+            .filter(|comparing| comparing.started.elapsed() >= PROGRESS_DELAY)
+            .map(progress_toast);
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -827,7 +843,14 @@ impl Render for TreeCompare {
                     .child(header(self.right_title.clone()))
                     .child(div().flex_none().w(scrollbar::WIDTH)),
             )
-            .child(div().flex_1().min_h_0().child(self.body(cx)))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.body(cx))
+                    .children(toast),
+            )
             .child(
                 div()
                     .flex_none()
@@ -841,5 +864,26 @@ impl Render for TreeCompare {
                     .child(status),
             )
             .children(self.copy_dialog(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_diff::ReadError;
+
+    #[test]
+    fn unreadable_directory_prevents_claiming_equality() {
+        let local = |path: &str| Location::local(path.into());
+        let mut diff = TreeDiff::new(local("/left"), local("/right"));
+        diff.extend([Found::Error(ReadError {
+            path: local("/left/Album"),
+            message: "Permission denied".to_owned(),
+        })]);
+
+        let status = summary(&diff, true);
+
+        assert!(!status.contains("Same entries"), "{status}");
+        assert!(status.contains("1 unreadable"), "{status}");
     }
 }

@@ -274,7 +274,6 @@ mod tests {
     use std::io;
 
     use super::*;
-    use crate::tree_diff::Progress;
 
     fn build(root: &Path, entries: &[&str]) -> io::Result<()> {
         for entry in entries {
@@ -293,7 +292,6 @@ mod tests {
         TreeDiff::compare(
             &Location::local(left.to_path_buf()),
             &Location::local(right.to_path_buf()),
-            &Progress::default(),
         )
     }
 
