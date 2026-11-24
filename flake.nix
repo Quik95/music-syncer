@@ -64,6 +64,8 @@
               openssl
               libxkbcommon
               wayland
+              # gpui-kit always enables GPUI's X11 backend.
+              libxcb
             ];
             dontUseCmakeConfigure = true;
           };
