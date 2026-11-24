@@ -1,17 +1,28 @@
 use std::{ops::Range, path::PathBuf};
 
-use gpui::{
-    AnyElement, App, ClickEvent, Context, FocusHandle, Focusable, MouseButton, NavigationDirection,
-    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
+use gpui_kit::{
+    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton,
+    NavigationDirection, ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window,
+    actions,
+    component::{
+        ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+        alert::Alert,
+        button::{Button, ButtonVariants as _},
+        empty::{Empty, EmptyHeader, EmptyTitle},
+        h_flex,
+        list::ListItem,
+        scroll::ScrollableElement as _,
+        v_flex,
+    },
+    div,
+    prelude::*,
     uniform_list,
 };
 
 use super::{
     SelectFirst, SelectLast, SelectNext, SelectNextPage, SelectPrevious, SelectPreviousPage,
     folder_picker::{self, Parent},
-    page_rows,
-    scrollbar::vertical_scrollbar,
-    theme,
+    page_rows, theme,
     track_preview::{self, COVER_PIXELS, Preview},
 };
 use crate::{
@@ -107,7 +118,7 @@ impl DirColumn {
                     Ok((track, cover)) => Preview::loaded(Box::new(track), cover),
                     Err(error) => {
                         tracing::warn!(path = %path.display(), error = format!("{error:#}"), "cannot read track");
-                        Preview::Failed(format!("Cannot read metadata: {error:#}"))
+                        Preview::Failed(format!("{error:#}"))
                     }
                 };
                 _ = this.update(cx, |this, cx| {
@@ -214,7 +225,10 @@ impl DirColumn {
 
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.listing.entries {
-            Ok(entries) if entries.is_empty() => div().px_2().child("(empty)").into_any_element(),
+            Ok(entries) if entries.is_empty() => Empty::new()
+                .size_full()
+                .header(EmptyHeader::new().title(EmptyTitle::new().child("Empty folder")))
+                .into_any_element(),
             Ok(entries) => {
                 let list = uniform_list(
                     "entries",
@@ -224,61 +238,123 @@ impl DirColumn {
                             return Vec::new();
                         };
                         let active = this.cursor.index();
-                        let active_bg = if this.focus_handle.is_focused(window) {
-                            *theme::ROW_ACTIVE
-                        } else {
-                            *theme::ROW_ACTIVE_UNFOCUSED
-                        };
+                        let focused = this.focus_handle.is_focused(window);
                         let first = range.start;
                         entries[range]
                             .iter()
                             .enumerate()
                             .map(|(offset, entry)| {
                                 let index = first + offset;
-                                // Hover state is tracked per element id; without it the
-                                // highlight only refreshes on unrelated redraws.
-                                let row = div().id(index).px_2().truncate().on_click(cx.listener(
-                                    move |this, event: &ClickEvent, window, cx| {
-                                        this.select(index, window, cx);
-                                        if event.click_count() == 2 {
-                                            this.open_selected(cx);
-                                        }
-                                    },
-                                ));
-                                let row = if active == Some(index) {
-                                    row.bg(active_bg)
-                                } else {
-                                    row.hover(|style| style.bg(*theme::ROW_HOVER))
+                                let is_active = active == Some(index);
+                                let row = ListItem::new(index)
+                                    .w_full()
+                                    .p_0()
+                                    .selected(is_active && focused)
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, window, cx| {
+                                            this.select(index, window, cx);
+                                            if event.click_count() == 2 {
+                                                this.open_selected(cx);
+                                            }
+                                        },
+                                    ));
+                                let (icon, icon_color, text_color) = match entry.kind {
+                                    EntryKind::Directory => {
+                                        let color = (*theme::DIRECTORY).into();
+                                        (IconName::Folder, color, color)
+                                    }
+                                    EntryKind::File { .. } => (
+                                        IconName::File,
+                                        cx.theme().muted_foreground,
+                                        cx.theme().foreground,
+                                    ),
                                 };
-                                match entry.kind {
-                                    EntryKind::Directory => row
-                                        .text_color(*theme::DIRECTORY)
-                                        .child(format!("{}/", entry.name)),
-                                    EntryKind::File { .. } => row.child(entry.name.clone()),
-                                }
+                                // The padding sits on the content, which covers the item, so
+                                // that the unfocused active background is the content's: the
+                                // item's hover would replace a background set on the item.
+                                row.child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .py_1()
+                                        .gap_2()
+                                        .min_w_0()
+                                        .when(is_active && !focused, |content| {
+                                            content.bg(*theme::ROW_ACTIVE_UNFOCUSED)
+                                        })
+                                        .text_color(text_color)
+                                        .child(Icon::new(icon).small().text_color(icon_color))
+                                        .child(
+                                            div().min_w_0().truncate().child(entry.name.clone()),
+                                        ),
+                                )
                             })
                             .collect()
                     }),
                 )
-                .flex_1()
-                .min_w_0()
-                .h_full()
+                .size_full()
                 .track_scroll(&self.scroll);
-                let scrollbar =
-                    vertical_scrollbar("scrollbar", self.scroll.0.borrow().base_handle.clone());
                 div()
-                    .flex()
+                    .relative()
                     .size_full()
                     .child(list)
-                    .child(scrollbar)
+                    .vertical_scrollbar(&self.scroll)
                     .into_any_element()
             }
             Err(error) => div()
-                .px_2()
-                .text_color(*theme::ERROR)
-                .child(format!("Cannot read directory: {error}"))
+                .p_2()
+                .child(Alert::error("read-error", error.to_string()).title("Cannot read directory"))
                 .into_any_element(),
         }
+    }
+
+    /// Path of the directory between buttons for going up and choosing another one. Its
+    /// border lights up while the column has focus.
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let border = if self.focus_handle.is_focused(window) {
+            cx.theme().ring
+        } else {
+            cx.theme().border
+        };
+        // Buttons hand focus back so the keyboard keeps moving through the entries.
+        let up = Button::new("parent")
+            .ghost()
+            .small()
+            .icon(IconName::ArrowUp)
+            .accessibility_label("Parent folder")
+            .tooltip("Parent folder")
+            .disabled(self.listing.path.parent().is_none())
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.open_parent(cx);
+            }));
+        let choose = Button::new("choose")
+            .ghost()
+            .small()
+            .icon(IconName::FolderOpen)
+            .accessibility_label("Choose folder")
+            .tooltip("Choose folder…")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.choose_directory(window, cx);
+            }));
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .px_1()
+            .py_1()
+            .bg(cx.theme().title_bar)
+            .border_b_1()
+            .border_color(border)
+            .child(up)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.title.clone()),
+            )
+            .child(choose)
     }
 }
 
@@ -306,12 +382,8 @@ impl Focusable for DirColumn {
 
 impl Render for DirColumn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header_border = if self.focus_handle.is_focused(window) {
-            *theme::FOCUS
-        } else {
-            *theme::BORDER
-        };
-        div()
+        let header = self.header(window, cx);
+        v_flex()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_mouse_down(
@@ -349,32 +421,14 @@ impl Render for DirColumn {
             .on_action(cx.listener(|this, _: &OpenParent, _, cx| {
                 this.open_parent(cx);
             }))
-            .flex()
-            .flex_col()
             .size_full()
-            .child(
-                div()
-                    .id("location")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.choose_directory(window, cx);
-                    }))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(*theme::HEADER_HOVER))
-                    .flex_none()
-                    .px_2()
-                    .py_1()
-                    .bg(*theme::HEADER_BACKGROUND)
-                    .border_b_1()
-                    .border_color(header_border)
-                    .truncate()
-                    .child(self.title.clone()),
-            )
+            .child(header)
             .child(div().flex_1().min_h_0().child(self.body(cx)))
             .children(
                 self.preview
                     .as_ref()
                     .and_then(|preview| preview.content.as_ref())
-                    .map(track_preview::render),
+                    .map(|preview| track_preview::render(preview, cx)),
             )
     }
 }

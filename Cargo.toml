@@ -19,8 +19,7 @@ allow_attributes_without_reason = "warn"
 anyhow = "1.0.104"
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser", "wayland", "raw_handle"] }
 directories = "6.0.0"
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", default-features = false, features = ["font-kit", "wayland"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.28.1", features = ["font-kit", "wayland"] }
+gpui-kit = { version = "0.10.0", default-features = false, features = ["component", "assets"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 jiff = { version = "0.2.42", default-features = false, features = ["std"] }
 lofty = "0.25.5"

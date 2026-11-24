@@ -5,16 +5,30 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, MouseButton, Rgba,
-    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions, div, prelude::*,
+use gpui_kit::{
+    AnyElement, App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, Hsla, MouseButton,
+    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, actions,
+    component::{
+        ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
+        button::{Button, ButtonVariants as _},
+        dialog::{Dialog, DialogEntrance, DialogFooter},
+        empty::{Empty, EmptyHeader, EmptyTitle},
+        h_flex,
+        list::ListItem,
+        notification::Notification,
+        progress::Progress as ProgressBar,
+        scroll::ScrollableElement as _,
+        status_bar::StatusBar,
+        v_flex,
+    },
+    div,
+    prelude::*,
     px, uniform_list,
 };
 
 use super::{
     SelectFirst, SelectLast, SelectNext, SelectNextPage, SelectPrevious, SelectPreviousPage,
-    page_rows, scrollbar, theme,
-    widgets::{button, format_bytes, modal, progress_bar},
+    page_rows, theme,
 };
 use crate::{
     content::{self, CheckPlan, Verdict},
@@ -58,9 +72,8 @@ pub struct TreeCompare {
     checking: Option<CheckJob>,
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
+    /// A copy or overwrite, shown in a dialog while it is confirmed and runs.
     copy: Option<Copy>,
-    /// Outcome of the last copy or content check, shown in the status bar.
-    notice: Option<SharedString>,
     _compare: Task<()>,
     _refresh: Task<()>,
 }
@@ -166,8 +179,9 @@ impl TreeCompare {
                 _ = this.update(cx, |this, cx| this.finish(cx));
             }
         });
-        // Redraws on every tick, not only when entries were found, as the toast's
-        // animation pauses when the desktop asks for reduced motion.
+        // Redraws on every tick, not only when entries were found: the toast has to appear
+        // once [`PROGRESS_DELAY`] passes, and its progress moves while a large directory
+        // is read without yielding new entries.
         let refresh = cx.spawn(async move |this, cx| {
             while let Ok(true) = this.update(cx, |this, cx| this.take_found(cx)) {
                 cx.background_executor().timer(PROGRESS_REFRESH).await;
@@ -193,7 +207,6 @@ impl TreeCompare {
             _compare: compare,
             _refresh: refresh,
             copy: None,
-            notice: None,
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         }
@@ -293,7 +306,13 @@ impl TreeCompare {
         let free =
             sync::free_space(diff.root(action.target())).map_err(|error| format!("{error:#}"));
         self.copy = Some(Copy::Confirm { plan, free });
+        // The dialog hands focus back to what had it, so the rows rather than the button
+        // that asked for the copy.
         window.focus(&self.focus_handle, cx);
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            view.read(cx).copy_dialog(dialog, &view, cx)
+        });
         cx.notify();
     }
 
@@ -307,7 +326,7 @@ impl TreeCompare {
 
     /// Compares the bytes of the files in `scope` that are on both sides with equal sizes,
     /// in the background.
-    pub fn check_contents(&mut self, scope: Scope, cx: &mut Context<Self>) {
+    pub fn check_contents(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_check(scope) {
             return;
         }
@@ -323,7 +342,7 @@ impl TreeCompare {
         let progress = Arc::new(JobProgress::default());
         let checked = Arc::new(Mutex::new(Vec::new()));
         let (files, bytes) = (plan.checks.len(), plan.bytes);
-        let run = cx.spawn({
+        let run = cx.spawn_in(window, {
             let (progress, checked) = (progress.clone(), checked.clone());
             async move |this, cx| {
                 cx.background_executor()
@@ -335,7 +354,7 @@ impl TreeCompare {
                         });
                     })
                     .await;
-                _ = this.update(cx, |this, cx| this.finish_check(cx));
+                _ = this.update_in(cx, |this, window, cx| this.finish_check(window, cx));
             }
         });
         let refresh = cx.spawn(async move |this, cx| {
@@ -355,7 +374,6 @@ impl TreeCompare {
             _run: run,
             _refresh: refresh,
         });
-        self.notice = None;
         cx.notify();
     }
 
@@ -397,7 +415,7 @@ impl TreeCompare {
         true
     }
 
-    fn finish_check(&mut self, cx: &mut Context<Self>) {
+    fn finish_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.take_checked(cx);
         let Some(job) = self.checking.take() else {
             return;
@@ -417,11 +435,16 @@ impl TreeCompare {
         if let Some(first) = &job.first_error {
             notice += &format!(", {} failed, first: {first}", job.failed);
         }
-        self.notice = Some(notice.into());
+        let complete = !cancelled && job.failed == 0;
+        push_outcome("Contents compared", notice, complete, window, cx);
         cx.notify();
     }
 
-    fn confirm_copy(&mut self, cx: &mut Context<Self>) {
+    /// Starts the pending copy when it fits into the target's free space.
+    fn confirm_copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.copy_fits() {
+            return;
+        }
         let Some(Copy::Confirm { plan, .. }) = self.copy.take() else {
             return;
         };
@@ -434,14 +457,16 @@ impl TreeCompare {
         );
         let progress = Arc::new(JobProgress::default());
         let (action, ops, bytes) = (plan.action, plan.ops.len(), plan.bytes);
-        let run = cx.spawn({
+        let run = cx.spawn_in(window, {
             let progress = progress.clone();
             async move |this, cx| {
                 let report = cx
                     .background_executor()
                     .spawn(async move { sync::execute(&plan, &progress) })
                     .await;
-                _ = this.update(cx, |this, cx| this.finish_copy(action, &report, cx));
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.finish_copy(action, &report, window, cx);
+                });
             }
         });
         let refresh = cx.spawn(async move |this, cx| {
@@ -463,8 +488,15 @@ impl TreeCompare {
         cx.notify();
     }
 
-    fn finish_copy(&mut self, action: Action, report: &Report, cx: &mut Context<Self>) {
+    fn finish_copy(
+        &mut self,
+        action: Action,
+        report: &Report,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.copy = None;
+        window.close_dialog(cx);
         tracing::info!(
             ?action,
             copied = report.copied.len(),
@@ -485,19 +517,24 @@ impl TreeCompare {
         comparison.outline.refresh(&comparison.diff);
         comparison.summary = summary(&comparison.diff, true);
         self.keep_active(active);
-        self.notice = Some(copy_notice(action, report).into());
+        let title = match action {
+            Action::Copy { .. } => "Copy finished",
+            Action::Overwrite => "Overwrite finished",
+        };
+        let complete = !report.cancelled && report.failed.is_empty();
+        push_outcome(title, copy_notice(action, report), complete, window, cx);
         cx.notify();
     }
 
-    /// Dismisses a pending confirmation, or stops the running copy or content check after
-    /// the entry it is working on.
+    /// Stops the running copy or content check after the entry it is working on. A pending
+    /// confirmation is its dialog's to dismiss.
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        match (&self.copy, &self.checking) {
-            (Some(Copy::Confirm { .. }), _) => self.copy = None,
-            (Some(Copy::Running(job)), _) => job.progress.cancel(),
-            (None, Some(job)) => job.progress.cancel(),
-            (None, None) => return,
-        }
+        let progress = match (&self.copy, &self.checking) {
+            (Some(Copy::Running(job)), _) => &job.progress,
+            (None, Some(job)) => &job.progress,
+            _ => return,
+        };
+        progress.cancel();
         cx.notify();
     }
 
@@ -603,14 +640,8 @@ impl TreeCompare {
         cx.notify();
     }
 
-    /// Expands or collapses the active directory; confirms a pending copy instead.
+    /// Expands or collapses the active directory.
     fn toggle(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.copy, Some(Copy::Confirm { .. })) {
-            if self.copy_fits() {
-                self.confirm_copy(cx);
-            }
-            return;
-        }
         let Some(node) = self.active_node() else {
             return;
         };
@@ -640,10 +671,12 @@ impl TreeCompare {
         let comparison = &self.comparison;
         if comparison.outline.rows().is_empty() {
             return match self.comparing {
-                Some(_) => div(),
-                None => div().px_2().child("(both empty)"),
-            }
-            .into_any_element();
+                Some(_) => div().into_any_element(),
+                None => Empty::new()
+                    .size_full()
+                    .header(EmptyHeader::new().title(EmptyTitle::new().child("Both empty")))
+                    .into_any_element(),
+            };
         }
         let list = uniform_list(
             "rows",
@@ -651,11 +684,7 @@ impl TreeCompare {
             cx.processor(|this, range: Range<usize>, window, cx| {
                 let comparison = &this.comparison;
                 let active = comparison.cursor.index();
-                let active_bg = if this.focus_handle.is_focused(window) {
-                    *theme::ROW_ACTIVE
-                } else {
-                    *theme::ROW_ACTIVE_UNFOCUSED
-                };
+                let focused = this.focus_handle.is_focused(window);
                 let first = range.start;
                 comparison.outline.rows()[range]
                     .iter()
@@ -665,149 +694,166 @@ impl TreeCompare {
                         let node = &comparison.diff.nodes[index];
                         let disclosure = comparison.diff.has_children(index).then(|| {
                             if comparison.outline.is_expanded(index) {
-                                "▾"
+                                IconName::ChevronDown
                             } else {
-                                "▸"
+                                IconName::ChevronRight
                             }
                         });
-                        let active_bg = (active == Some(row)).then_some(active_bg);
-                        div()
-                            .id(row)
-                            .flex()
+                        let is_active = active == Some(row);
+                        let item = ListItem::new(row)
                             .w_full()
-                            .hover(|style| style.bg(*theme::ROW_HOVER))
+                            .p_0()
+                            .gap_0()
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.select(row, window, cx);
                                 if event.click_count() == 2 {
                                     this.toggle(cx);
                                 }
-                            }))
+                            }));
+                        // Unfocused, the active row paints its own background on the
+                        // cells, which cover the item: the item's hover would replace a
+                        // background set on the item itself.
+                        let cells = h_flex()
+                            .w_full()
+                            .items_stretch()
+                            .when(is_active && !focused, |cells| {
+                                cells.bg(*theme::ROW_ACTIVE_UNFOCUSED)
+                            })
                             .child(
-                                cell(node, disclosure, Side::Left, active_bg)
+                                cell(node, disclosure.clone(), Side::Left, is_active, cx)
                                     .border_r_1()
-                                    .border_color(*theme::BORDER),
+                                    .border_color(cx.theme().border),
                             )
-                            .child(cell(node, disclosure, Side::Right, active_bg))
+                            .child(cell(node, disclosure, Side::Right, is_active, cx));
+                        item.selected(is_active && focused).child(cells)
                     })
                     .collect()
             }),
         )
-        .flex_1()
-        .min_w_0()
-        .h_full()
+        .size_full()
         .track_scroll(&self.scroll);
-        let scrollbar =
-            scrollbar::vertical_scrollbar("scrollbar", self.scroll.0.borrow().base_handle.clone());
         div()
-            .flex()
+            .relative()
             .size_full()
             .child(list)
-            .child(scrollbar)
+            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 
-    fn copy_dialog(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let card = match self.copy.as_ref()? {
-            Copy::Confirm { plan, free } => {
-                let fits = self.copy_fits();
-                let target = plan.action.target();
-                let (from, to) = self.titles(target);
-                let (question, confirm) = match plan.action {
-                    Action::Copy { .. } => (
-                        format!(
-                            "Copy {} to the {}?",
-                            describe(plan.files, plan.dirs, plan.bytes),
-                            side_name(target)
-                        ),
-                        "Copy",
-                    ),
-                    Action::Overwrite => (
-                        format!(
-                            "Overwrite {} on the {} with the version from the {}?",
-                            describe(plan.files, plan.dirs, plan.bytes),
-                            side_name(target),
-                            side_name(target.other())
-                        ),
-                        "Overwrite",
-                    ),
-                };
-                let free = match free {
-                    Ok(free) if fits => {
-                        div().child(format!("Free on the target: {}", format_bytes(*free)))
-                    }
-                    Ok(free) => div().text_color(*theme::ERROR).child(format!(
-                        "Not enough space: {} free on the target, {} needed",
-                        format_bytes(*free),
-                        format_bytes(plan.space)
-                    )),
-                    Err(error) => div()
-                        .text_color(*theme::TEXT_MUTED)
-                        .child(format!("Free space unknown: {error}")),
-                };
-                div()
-                    .flex()
-                    .flex_col()
+    /// The pending copy's confirmation, then its progress while it runs. Built by the
+    /// window's dialog layer on every render, so it follows [`Self::copy`].
+    ///
+    /// Without animation: the layer keeps building a dialog through its exit, by when
+    /// [`Self::copy`] is already gone, so an animated exit would show an empty dialog.
+    fn copy_dialog(&self, dialog: Dialog, view: &Entity<Self>, cx: &App) -> Dialog {
+        let dialog = dialog.entrance(DialogEntrance::None);
+        match &self.copy {
+            None => dialog,
+            Some(Copy::Confirm { plan, free }) => self.confirm_dialog(dialog, plan, free, view, cx),
+            Some(Copy::Running(job)) => running_dialog(dialog, job, view, cx),
+        }
+    }
+
+    /// What the pending copy takes and whether it fits, with buttons to run or drop it.
+    fn confirm_dialog(
+        &self,
+        dialog: Dialog,
+        plan: &Plan,
+        free: &Result<u64, String>,
+        view: &Entity<Self>,
+        cx: &App,
+    ) -> Dialog {
+        let theme = cx.theme();
+        let fits = self.copy_fits();
+        let target = plan.action.target();
+        let (from, to) = self.titles(target);
+        let (question, confirm) = match plan.action {
+            Action::Copy { .. } => (
+                format!(
+                    "Copy {} to the {}?",
+                    describe(plan.files, plan.dirs, plan.bytes),
+                    side_name(target)
+                ),
+                "Copy",
+            ),
+            Action::Overwrite => (
+                format!(
+                    "Overwrite {} on the {} with the version from the {}?",
+                    describe(plan.files, plan.dirs, plan.bytes),
+                    side_name(target),
+                    side_name(target.other())
+                ),
+                "Overwrite",
+            ),
+        };
+        let free = match free {
+            Ok(free) if fits => div().child(format!("Free on the target: {}", format_bytes(*free))),
+            Ok(free) => div().text_color(theme.danger).child(format!(
+                "Not enough space: {} free on the target, {} needed",
+                format_bytes(*free),
+                format_bytes(plan.space)
+            )),
+            Err(error) => div()
+                .text_color(theme.muted_foreground)
+                .child(format!("Free space unknown: {error}")),
+        };
+        let footer = DialogFooter::new()
+            .child(Button::new("copy-cancel").label("Cancel").on_click({
+                let view = view.clone();
+                move |_, window, cx| {
+                    view.update(cx, Self::dismiss_copy);
+                    window.close_dialog(cx);
+                }
+            }))
+            .child(
+                Button::new("copy-confirm")
+                    .primary()
+                    .label(confirm)
+                    .disabled(!fits)
+                    .on_click({
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| this.confirm_copy(window, cx));
+                        }
+                    }),
+            );
+        dialog
+            .title(confirm)
+            .child(
+                v_flex()
                     .gap_2()
                     .child(question)
                     .child(
-                        div()
-                            .text_color(*theme::TEXT_MUTED)
+                        v_flex()
+                            .text_color(theme.muted_foreground)
                             .child(format!("From {from}"))
                             .child(format!("To {to}")),
                     )
-                    .child(free)
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(button("copy-cancel", false, true).child("Cancel").on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| this.cancel(cx)),
-                            ))
-                            .child(button("copy-confirm", true, fits).child(confirm).on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if this.copy_fits() {
-                                        this.confirm_copy(cx);
-                                    }
-                                }),
-                            )),
-                    )
-            }
-            Copy::Running(job) => {
-                let done = job.progress.done();
-                let fraction = fraction(&job.progress, done, job.ops, job.bytes);
-                let target = side_name(job.action.target());
-                let title = match job.action {
-                    Action::Copy { .. } => format!("Copying to the {target}…"),
-                    Action::Overwrite => format!("Overwriting on the {target}…"),
-                };
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .child(title)
-                    .child(progress_bar(fraction))
-                    .child(
-                        div()
-                            .text_color(*theme::TEXT_MUTED)
-                            .max_w(px(480.))
-                            .truncate()
-                            .child(format!(
-                                "{} of {} · {}",
-                                (done + 1).min(job.ops),
-                                job.ops,
-                                job.progress.current()
-                            )),
-                    )
-                    .child(
-                        button("copy-stop", false, true)
-                            .child("Stop")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel(cx))),
-                    )
-            }
-        };
-        Some(modal(card))
+                    .child(free),
+            )
+            .footer(footer)
+            // Enter, which keeps the dialog open as it turns into the progress.
+            .on_ok({
+                let view = view.clone();
+                move |_, window, cx| {
+                    view.update(cx, |this, cx| this.confirm_copy(window, cx));
+                    false
+                }
+            })
+            // Escape, the close button or a click beside the dialog; closing it through
+            // the window skips this, see the Cancel button.
+            .on_close({
+                let view = view.clone();
+                move |_, _, cx| view.update(cx, Self::dismiss_copy)
+            })
+    }
+
+    /// Forgets a copy that was not confirmed when its dialog closes.
+    fn dismiss_copy(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.copy, Some(Copy::Confirm { .. })) {
+            self.copy = None;
+            cx.notify();
+        }
     }
 
     /// Progress of reading the trees, once it takes longer than [`PROGRESS_DELAY`], or of
@@ -820,11 +866,16 @@ impl TreeCompare {
                     "Comparing trees…",
                     progress.fraction(),
                     format!("{} entries found", progress.entries()),
+                    cx,
                 )
             });
         }
         let job = self.checking.as_ref()?;
         let done = job.progress.done();
+        let stop = Button::new("check-stop")
+            .small()
+            .label("Stop")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel(cx)));
         Some(
             toast(
                 "Comparing contents…",
@@ -835,14 +886,9 @@ impl TreeCompare {
                     job.files,
                     job.progress.current()
                 ),
+                cx,
             )
-            .child(
-                div().flex().justify_end().child(
-                    button("check-stop", false, true)
-                        .child("Stop")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel(cx))),
-                ),
-            ),
+            .child(h_flex().justify_end().child(stop)),
         )
     }
 
@@ -856,30 +902,33 @@ impl TreeCompare {
 }
 
 /// One side of a row: the entry indented by depth, or an empty gap where it is missing.
-fn cell(node: &Node, disclosure: Option<&'static str>, side: Side, active_bg: Option<Rgba>) -> Div {
+/// Sides of the active row leave the row's selection showing, gaps excepted.
+fn cell(node: &Node, disclosure: Option<IconName>, side: Side, active: bool, cx: &App) -> Div {
     // Fixed half rather than `flex_1`: flex adds the depth padding to each half's width.
     let cell = div().flex_none().w_1_2().overflow_hidden();
     if !node.presence.is_on(side) {
         return cell.bg(*theme::MISSING_HERE);
     }
-    let cell = match (active_bg, node.presence) {
-        (Some(bg), _) => cell.bg(bg),
-        (None, Presence::Both) if node.content == Some(Content::Changed) => {
-            cell.bg(*theme::CHANGED)
-        }
-        (None, Presence::Both) => cell,
-        (None, Presence::LeftOnly | Presence::RightOnly) => cell.bg(*theme::ONLY_HERE),
+    let cell = match node.presence {
+        _ if active => cell,
+        Presence::Both if node.content == Some(Content::Changed) => cell.bg(*theme::CHANGED),
+        Presence::Both => cell,
+        Presence::LeftOnly | Presence::RightOnly => cell.bg(*theme::ONLY_HERE),
+    };
+    let muted = cx.theme().muted_foreground;
+    let (icon, icon_color): (_, Hsla) = match node.kind {
+        EntryKind::Directory => (IconName::Folder, (*theme::DIRECTORY).into()),
+        EntryKind::File { .. } => (IconName::File, muted),
     };
     let color = match node.kind {
-        _ if node.presence == Presence::Both && node.differs => *theme::DIFFERS,
-        EntryKind::Directory => *theme::DIRECTORY,
-        EntryKind::File { .. } => *theme::TEXT,
-    };
-    let name = match node.kind {
-        EntryKind::Directory => format!("{}/", node.name),
-        EntryKind::File { .. } => node.name.clone(),
+        _ if node.presence == Presence::Both && node.differs => (*theme::DIFFERS).into(),
+        EntryKind::Directory => icon_color,
+        EntryKind::File { .. } => cx.theme().foreground,
     };
     cell.flex()
+        .items_center()
+        .gap_1()
+        .py_1()
         .pl(px(8. + INDENT * node.depth as f32))
         .pr_2()
         .text_color(color)
@@ -887,38 +936,100 @@ fn cell(node: &Node, disclosure: Option<&'static str>, side: Side, active_bg: Op
             div()
                 .flex_none()
                 .w(px(INDENT))
-                .text_color(*theme::TEXT_MUTED)
-                .children(disclosure),
+                .children(disclosure.map(|icon| Icon::new(icon).xsmall().text_color(muted))),
         )
-        .child(div().min_w_0().truncate().child(name))
+        .child(Icon::new(icon).small().text_color(icon_color))
+        .child(div().min_w_0().truncate().child(node.name.clone()))
+}
+
+/// Progress of a running copy with a button to stop it. Escape stops it too; the dialog
+/// stays until the copy ends, so neither Escape nor Enter closes it.
+fn running_dialog(dialog: Dialog, job: &CopyJob, view: &Entity<TreeCompare>, cx: &App) -> Dialog {
+    let done = job.progress.done();
+    let fraction = fraction(&job.progress, done, job.ops, job.bytes);
+    let target = side_name(job.action.target());
+    let title = match job.action {
+        Action::Copy { .. } => format!("Copying to the {target}…"),
+        Action::Overwrite => format!("Overwriting on the {target}…"),
+    };
+    let stop = Button::new("copy-stop").label("Stop").on_click({
+        let view = view.clone();
+        move |_, _, cx| view.update(cx, TreeCompare::cancel)
+    });
+    dialog
+        .title(title)
+        .close_button(false)
+        .overlay_closable(false)
+        .on_cancel({
+            let view = view.clone();
+            move |_, _, cx| {
+                view.update(cx, TreeCompare::cancel);
+                false
+            }
+        })
+        .on_ok(|_, _, _| false)
+        .child(
+            v_flex()
+                .gap_2()
+                .child(ProgressBar::new("copy-progress").value(fraction * 100.))
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(format!(
+                            "{} of {} · {}",
+                            (done + 1).min(job.ops),
+                            job.ops,
+                            job.progress.current()
+                        )),
+                ),
+        )
+        .footer(DialogFooter::new().child(stop))
 }
 
 /// A progress card in the bottom right corner of the list area, which must be `relative`.
 /// Covers only itself, so the rows stay usable.
-fn toast(title: &'static str, fraction: f32, caption: String) -> Div {
-    div()
+fn toast(title: &'static str, fraction: f32, caption: String, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
         .absolute()
         .bottom_2()
-        .right(scrollbar::WIDTH + px(8.))
+        .right_4()
+        .w(px(340.))
         .occlude()
-        .flex()
-        .flex_col()
-        .gap_1()
+        .gap_2()
         .p_3()
-        .rounded_md()
+        .rounded(theme.radius_lg)
         .border_1()
-        .border_color(*theme::BORDER)
-        .bg(*theme::HEADER_BACKGROUND)
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .text_color(theme.popover_foreground)
         .shadow_lg()
         .child(title)
-        .child(progress_bar(fraction))
+        .child(ProgressBar::new("toast-progress").value(fraction * 100.))
         .child(
             div()
-                .max_w(px(320.))
                 .truncate()
-                .text_color(*theme::TEXT_MUTED)
+                .text_color(theme.muted_foreground)
                 .child(caption),
         )
+}
+
+/// Reports how a copy or content check ended. A complete one fades away on its own; one
+/// that stopped early or failed somewhere stays until dismissed.
+fn push_outcome(
+    title: &'static str,
+    message: String,
+    complete: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let notification = if complete {
+        Notification::success(message)
+    } else {
+        Notification::warning(message).autohide(false)
+    };
+    window.push_notification(notification.title(title), cx);
 }
 
 /// Share of a job done: by bytes when it has any, else by entries.
@@ -949,6 +1060,22 @@ fn describe(files: usize, dirs: usize, bytes: u64) -> String {
         parts.push(count(dirs, "folder", "folders"));
     }
     format!("{} ({})", parts.join(" and "), format_bytes(bytes))
+}
+
+/// Decimal units, as in Dolphin: "1.2 GB".
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["kB", "MB", "GB", "TB", "PB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    // Lossy for sizes above 2^53 bytes, far beyond any disk.
+    let mut value = bytes as f64 / 1000.;
+    let mut unit = 0;
+    while value >= 999.95 && unit + 1 < UNITS.len() {
+        value /= 1000.;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 fn copy_notice(action: Action, report: &Report) -> String {
@@ -1015,24 +1142,42 @@ impl Focusable for TreeCompare {
 }
 
 impl Render for TreeCompare {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = |this: &Self| page_rows(&this.scroll, this.comparison.outline.rows().len());
         let header = |title: SharedString| {
             div()
                 .flex_1()
                 .min_w_0()
-                .px_2()
+                .px_3()
                 .py_1()
                 .truncate()
                 .child(title)
         };
-        let summary = &self.comparison.summary;
-        let status: SharedString = match &self.notice {
-            Some(notice) => format!("{notice} · {summary}").into(),
-            None => summary.clone(),
+        let theme = cx.theme();
+        let header_border = if self.focus_handle.is_focused(window) {
+            theme.ring
+        } else {
+            theme.border
         };
+        let headers = h_flex()
+            .flex_none()
+            .bg(theme.title_bar)
+            .border_b_1()
+            .border_color(header_border)
+            .child(
+                header(self.left_title.clone())
+                    .border_r_1()
+                    .border_color(theme.border),
+            )
+            .child(header(self.right_title.clone()));
+        let status = StatusBar::new().child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(self.comparison.summary.clone()),
+        );
         let toast = self.toast(cx);
-        div()
+        v_flex()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_mouse_down(
@@ -1071,25 +1216,8 @@ impl Render for TreeCompare {
                 this.request(Scope::Active, action, window, cx);
             }))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| this.cancel(cx)))
-            .relative()
-            .flex()
-            .flex_col()
             .size_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .bg(*theme::HEADER_BACKGROUND)
-                    .border_b_1()
-                    .border_color(*theme::FOCUS)
-                    .child(
-                        header(self.left_title.clone())
-                            .border_r_1()
-                            .border_color(*theme::BORDER),
-                    )
-                    .child(header(self.right_title.clone()))
-                    .child(div().flex_none().w(scrollbar::WIDTH)),
-            )
+            .child(headers)
             .child(
                 div()
                     .relative()
@@ -1098,19 +1226,7 @@ impl Render for TreeCompare {
                     .child(self.body(cx))
                     .children(toast),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(*theme::BORDER)
-                    .bg(*theme::HEADER_BACKGROUND)
-                    .text_color(*theme::TEXT_MUTED)
-                    .truncate()
-                    .child(status),
-            )
-            .children(self.copy_dialog(cx))
+            .child(status)
     }
 }
 
@@ -1132,5 +1248,14 @@ mod tests {
 
         assert!(!status.contains("Same entries"), "{status}");
         assert!(status.contains("1 unreadable"), "{status}");
+    }
+
+    #[test]
+    fn bytes_use_decimal_units_without_rounding_up_to_1000() {
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(1_000), "1.0 kB");
+        assert_eq!(format_bytes(1_234_567), "1.2 MB");
+        assert_eq!(format_bytes(999_960), "1.0 MB");
+        assert_eq!(format_bytes(52_400_000_000), "52.4 GB");
     }
 }

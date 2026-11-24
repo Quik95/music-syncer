@@ -15,7 +15,7 @@ use ashpd::{
     Error, WindowIdentifier,
     desktop::{ResponseError, file_chooser::OpenFileRequest},
 };
-use gpui::Window;
+use gpui_kit::Window;
 use raw_window_handle::{
     HasDisplayHandle as _, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
 };

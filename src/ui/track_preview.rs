@@ -1,9 +1,17 @@
 use std::{sync::Arc, time::Duration};
 
-use gpui::{AnyElement, ObjectFit, RenderImage, div, img, prelude::*, px};
+use gpui_kit::{
+    AnyElement, App, FontWeight, ObjectFit, RenderImage,
+    assets::IconName,
+    component::{
+        ActiveTheme as _, Icon, Sizable as _, alert::Alert, h_flex, label::Label, tag::Tag, v_flex,
+    },
+    div, img,
+    prelude::*,
+    px,
+};
 use image::{Frame, RgbaImage};
 
-use super::theme;
 use crate::track::{Position, Track};
 
 /// Cover edge in logical pixels; decoded at twice that for HiDPI screens.
@@ -45,14 +53,15 @@ fn render_image(mut cover: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![Frame::new(cover)]))
 }
 
-pub fn render(preview: &Preview) -> AnyElement {
-    let panel = div()
-        .flex()
+pub fn render(preview: &Preview, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let panel = h_flex()
+        .items_start()
         .gap_3()
         .p_2()
         .border_t_1()
-        .border_color(*theme::BORDER)
-        .bg(*theme::HEADER_BACKGROUND);
+        .border_color(theme.border)
+        .bg(theme.title_bar);
     match preview {
         Preview::Loaded { track, cover } => {
             let frame = div()
@@ -61,62 +70,77 @@ pub fn render(preview: &Preview) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(*theme::BACKGROUND);
+                .rounded(theme.radius)
+                .bg(theme.background);
             let frame = match cover {
                 Some(image) => frame.child(
                     img(image.clone())
                         .size_full()
                         .object_fit(ObjectFit::Contain),
                 ),
-                None => frame.text_color(*theme::TEXT_MUTED).child("No cover"),
+                None => frame.child(
+                    // Registered in `super::assets`; outside the kit's default icons.
+                    Icon::new(IconName::Disc3)
+                        .large()
+                        .text_color(theme.muted_foreground),
+                ),
             };
-            panel.child(frame).child(details(track)).into_any_element()
+            panel
+                .child(frame)
+                .child(details(track, cx))
+                .into_any_element()
         }
         Preview::Failed(error) => panel
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_color(*theme::ERROR)
-                    .child(error.clone()),
+                Alert::error("preview-error", error.clone())
+                    .title("Cannot read metadata")
+                    .flex_1(),
             )
             .into_any_element(),
     }
 }
 
-fn details(track: &Track) -> impl IntoElement {
-    let line = |text: String| div().truncate().child(text);
-    let muted = |text: String| line(text).text_color(*theme::TEXT_MUTED);
-    let mut column = div().flex().flex_col().min_w_0().flex_1().child(
+fn details(track: &Track, cx: &App) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    // One `Label::new` call site for every line, so each needs its own id: the default one
+    // is that call site.
+    let line = |id: &'static str, text: String| Label::new(text).id(id).truncate();
+    let mut column = v_flex().min_w_0().flex_1().gap_0p5().child(
         line(
+            "title",
             track
                 .title
                 .clone()
                 .unwrap_or_else(|| "Unknown title".into()),
         )
         .text_lg()
-        .font_weight(gpui::FontWeight::BOLD),
+        .font_weight(FontWeight::BOLD),
     );
     column = column.child(line(
+        "artist",
         track
             .artist
             .clone()
             .unwrap_or_else(|| "Unknown artist".into()),
     ));
     if let Some(album) = album_line(track) {
-        column = column.child(line(album));
+        column = column.child(line("album", album));
     }
     if let Some(artist) = track
         .album_artist
         .as_ref()
         .filter(|album_artist| track.artist.as_ref() != Some(*album_artist))
     {
-        column = column.child(muted(format!("Album artist: {artist}")));
+        column =
+            column.child(line("album-artist", format!("Album artist: {artist}")).text_color(muted));
     }
     if let Some(position) = position_line(track) {
-        column = column.child(muted(position));
+        column = column.child(line("position", position).text_color(muted));
     }
-    column.child(muted(stream_line(track)))
+    let tags = stream_parts(track)
+        .into_iter()
+        .map(|part| Tag::secondary().small().child(part));
+    column.child(h_flex().flex_wrap().gap_1().pt_1().children(tags))
 }
 
 /// "Album (Year)".
@@ -146,9 +170,9 @@ fn position_line(track: &Track) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// "3:45 · FLAC · 44.1 kHz · 16-bit · stereo · 1012 kbps".
-fn stream_line(track: &Track) -> String {
-    let parts = [
+/// "3:45", "FLAC", "44.1 kHz", "16-bit", "stereo", "1012 kbps".
+fn stream_parts(track: &Track) -> impl IntoIterator<Item = String> {
+    [
         Some(duration(track.duration)),
         Some(track.format.to_owned()),
         track
@@ -161,8 +185,9 @@ fn stream_line(track: &Track) -> String {
             n => format!("{n} ch"),
         }),
         track.bitrate_kbps.map(|kbps| format!("{kbps} kbps")),
-    ];
-    parts.into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    ]
+    .into_iter()
+    .flatten()
 }
 
 /// "m:ss", or "h:mm:ss" from an hour up.

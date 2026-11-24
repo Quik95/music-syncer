@@ -1,13 +1,19 @@
-use gpui::{
-    AppContext as _, ClickEvent, Context, Div, Entity, Focusable as _, SharedString, Stateful,
-    Subscription, Window, actions, div, prelude::*,
+use gpui_kit::{
+    AnyElement, ClickEvent, Entity, Focusable as _, Subscription, Window, actions,
+    component::{
+        ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _,
+        button::Button,
+        h_flex,
+        toolbar::{Toolbar, ToolbarGroup},
+        v_flex,
+    },
+    div,
+    prelude::*,
 };
 
 use super::{
     dir_column::DirColumn,
-    theme,
     tree_compare::{Scope, TreeCompare},
-    widgets::button,
 };
 use crate::{listing::Listing, sync::Action, tree_diff::Side};
 
@@ -69,122 +75,143 @@ impl Browser {
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let label: SharedString = if self.compare.is_some() {
-            "Close comparison".into()
-        } else {
-            "Compare trees".into()
+        let comparing = self.compare.is_some();
+        let toggle = Button::new("compare")
+            .icon(if comparing {
+                IconName::Close
+            } else {
+                IconName::Search
+            })
+            .label(if comparing {
+                "Close comparison"
+            } else {
+                "Compare trees"
+            })
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.toggle_compare(window, cx);
+            }));
+        let toolbar = Toolbar::new("toolbar").small().flex_wrap().child(toggle);
+        let toolbar = match &self.compare {
+            Some(compare) => Self::compare_groups(&compare.view, cx)
+                .into_iter()
+                .fold(toolbar, Toolbar::child),
+            None => toolbar,
         };
-        let compare_buttons = self
-            .compare
-            .as_ref()
-            .map(|compare| Self::compare_buttons(&compare.view, cx))
-            .unwrap_or_default();
         div()
-            .flex()
-            .flex_wrap()
             .flex_none()
-            .gap_2()
-            .px_2()
-            .py_1()
             .border_b_1()
-            .border_color(*theme::BORDER)
-            .child(
-                button("compare", false, true)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.toggle_compare(window, cx);
-                    }))
-                    .child(label),
-            )
-            .children(compare_buttons)
+            .border_color(cx.theme().border)
+            .bg(cx.theme().title_bar)
+            .child(toolbar)
     }
 
-    /// The differences filter and the copy actions, each enabled when it has work.
-    fn compare_buttons(
-        compare: &Entity<TreeCompare>,
-        cx: &mut Context<Self>,
-    ) -> Vec<Stateful<Div>> {
+    /// The differences filter and the copy actions, each enabled when it has work. A click
+    /// returns focus to the comparison, so the keyboard keeps moving through its rows.
+    fn compare_groups(compare: &Entity<TreeCompare>, cx: &mut Context<Self>) -> [ToolbarGroup; 4] {
         let view = compare.read(cx);
         let on = view.only_differences();
-        let filter = button("only-differences", on, true)
+        let filter = Button::new("only-differences")
+            .label("Only differences")
+            .selected(on)
+            .toggled(on)
             .on_click(cx.listener({
                 let compare = compare.clone();
-                move |_, _: &ClickEvent, _, cx| {
+                move |_, _: &ClickEvent, window, cx| {
                     compare.update(cx, |compare, cx| compare.set_only_differences(!on, cx));
+                    window.focus(&compare.focus_handle(cx), cx);
                 }
-            }))
-            .child("Only differences");
-        let checks = [
-            ("check-active", "Check contents", Scope::Active),
-            ("check-all", "Check all contents", Scope::All),
-        ]
-        .map(|(id, label, scope)| {
-            let enabled = view.can_check(scope);
+            }));
+        let check = |(id, label, scope)| {
             let compare = compare.clone();
-            button(id, false, enabled)
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    compare.update(cx, |compare, cx| compare.check_contents(scope, cx));
+            Button::new(id)
+                .label(label)
+                .disabled(!view.can_check(scope))
+                .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
+                    compare.update(cx, |compare, cx| compare.check_contents(scope, window, cx));
+                    window.focus(&compare.focus_handle(cx), cx);
                 }))
-                .child(label)
-        });
-        let to_right = Action::Copy {
-            target: Side::Right,
         };
-        let to_left = Action::Copy { target: Side::Left };
-        let actions = [
-            ("copy-active-right", "Copy →", Scope::Active, to_right),
-            ("copy-active-left", "← Copy", Scope::Active, to_left),
-            ("copy-all-right", "Copy all missing →", Scope::All, to_right),
-            ("copy-all-left", "← Copy all missing", Scope::All, to_left),
-            (
-                "overwrite-active",
-                "Overwrite →",
-                Scope::Active,
-                Action::Overwrite,
-            ),
-            (
-                "overwrite-all",
-                "Overwrite all changed →",
-                Scope::All,
-                Action::Overwrite,
-            ),
-        ]
-        .map(|(id, label, scope, action)| {
-            let enabled = view.can_run(scope, action);
+        // The arrow shows the direction, so the spoken name has to say it. Overwriting only
+        // goes to the right.
+        let copy = |(id, label, name, scope, action): (_, _, _, _, Action)| {
             let compare = compare.clone();
-            button(id, false, enabled)
+            let icon = match action.target() {
+                Side::Left => IconName::ArrowLeft,
+                Side::Right => IconName::ArrowRight,
+            };
+            Button::new(id)
+                .icon(icon)
+                .label(label)
+                .accessibility_label(name)
+                .disabled(!view.can_run(scope, action))
                 .on_click(cx.listener(move |_, _: &ClickEvent, window, cx| {
                     compare.update(cx, |compare, cx| {
                         compare.request(scope, action, window, cx);
                     });
                 }))
-                .child(label)
-        });
-        std::iter::once(filter)
-            .chain(checks)
-            .chain(actions)
-            .collect()
+        };
+        let to_right = Action::Copy {
+            target: Side::Right,
+        };
+        let to_left = Action::Copy { target: Side::Left };
+        #[rustfmt::skip]
+        let copies = [
+            ("copy-active-right", "Copy", "Copy to the right", Scope::Active, to_right),
+            ("copy-active-left", "Copy", "Copy to the left", Scope::Active, to_left),
+            ("copy-all-right", "Copy all missing", "Copy all missing to the right", Scope::All, to_right),
+            ("copy-all-left", "Copy all missing", "Copy all missing to the left", Scope::All, to_left),
+        ];
+        #[rustfmt::skip]
+        let overwrites = [
+            ("overwrite-active", "Overwrite", "Overwrite on the right", Scope::Active, Action::Overwrite),
+            ("overwrite-all", "Overwrite all changed", "Overwrite all changed on the right", Scope::All, Action::Overwrite),
+        ];
+        // Groups leave the spacing between their buttons to the caller. Buttons go into
+        // the groups one by one, each boxed there, rather than as arrays of buttons.
+        let group = |id, label| ToolbarGroup::new(id).label(label).gap_1().flex_wrap();
+        [
+            group("filter", "Filter").child(filter),
+            group("check", "Compare contents").children(
+                [
+                    ("check-active", "Check contents", Scope::Active),
+                    ("check-all", "Check all contents", Scope::All),
+                ]
+                .into_iter()
+                .map(check),
+            ),
+            group("copy", "Copy").children(copies.into_iter().map(copy)),
+            group("overwrite", "Overwrite").children(overwrites.into_iter().map(copy)),
+        ]
     }
-}
 
-impl Render for Browser {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match &self.compare {
-            Some(compare) => div().flex_1().min_h_0().child(compare.view.clone()),
-            None => div()
-                .flex()
+    fn content(&self, cx: &mut Context<Self>) -> AnyElement {
+        match &self.compare {
+            Some(compare) => div()
                 .flex_1()
                 .min_h_0()
+                .child(compare.view.clone())
+                .into_any_element(),
+            None => h_flex()
+                .flex_1()
+                .min_h_0()
+                .items_stretch()
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .border_r_1()
-                        .border_color(*theme::BORDER)
+                        .border_color(cx.theme().border)
                         .child(self.left.clone()),
                 )
-                .child(div().flex_1().min_w_0().child(self.right.clone())),
-        };
-        div()
+                .child(div().flex_1().min_w_0().child(self.right.clone()))
+                .into_any_element(),
+        }
+    }
+}
+
+impl Render for Browser {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &FocusLeftColumn, window, cx| {
                 this.focus(&this.left.clone(), window, cx);
@@ -200,12 +227,10 @@ impl Render for Browser {
                 };
                 this.focus(&other, window, cx);
             }))
-            .flex()
-            .flex_col()
             .size_full()
-            .bg(*theme::BACKGROUND)
-            .text_color(*theme::TEXT)
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .child(self.toolbar(cx))
-            .child(content)
+            .child(self.content(cx))
     }
 }

@@ -1,9 +1,13 @@
 //! Nord palette in OKLCH. Surfaces are the background raised in lightness, so equal steps
-//! look equally brighter.
+//! look equally brighter. [`apply`] dresses the kit's dark theme in it; the statics are the
+//! colors the kit has no slot for.
 
 use std::sync::LazyLock;
 
-use gpui::Rgba;
+use gpui_kit::{
+    App, Rgba,
+    component::{Theme, ThemeMode},
+};
 use palette::{FromColor as _, OklabHue, Oklch, Srgb};
 
 const fn oklch(l: f32, chroma: f32, hue: f32) -> Oklch {
@@ -54,29 +58,92 @@ macro_rules! colors {
 }
 
 colors! {
-    BACKGROUND = POLAR_NIGHT;
-    HEADER_BACKGROUND = lighter(POLAR_NIGHT, RAISED);
-    HEADER_HOVER = lighter(POLAR_NIGHT, HIGHLIGHT);
-    BORDER = lighter(POLAR_NIGHT, OUTLINE);
-    TEXT = SNOW_STORM;
-    TEXT_MUTED = FROST_BLUE;
     DIRECTORY = FROST_TEAL;
-    ERROR = AURORA_RED;
-    ROW_HOVER = lighter(POLAR_NIGHT, RAISED);
-    ROW_ACTIVE = lighter(POLAR_NIGHT, OUTLINE);
     ROW_ACTIVE_UNFOCUSED = lighter(POLAR_NIGHT, HIGHLIGHT);
-    FOCUS = FROST_TEAL;
-    SCROLLBAR_TRACK = lighter(POLAR_NIGHT, RAISED);
-    SCROLLBAR_THUMB = lighter(POLAR_NIGHT, 0.21);
-    SCROLLBAR_THUMB_ACTIVE = lighter(POLAR_NIGHT, 0.30);
-    BUTTON = lighter(POLAR_NIGHT, HIGHLIGHT);
-    BUTTON_HOVER = lighter(POLAR_NIGHT, OUTLINE);
-    BUTTON_PRESSED = tint(FROST_TEAL, 0.48);
     DIFFERS = AURORA_YELLOW;
     ONLY_HERE = tint(AURORA_GREEN, 0.40);
     MISSING_HERE = tint(AURORA_RED, 0.36);
     CHANGED = tint(AURORA_YELLOW, 0.40);
-    PROGRESS_TRACK = lighter(POLAR_NIGHT, HIGHLIGHT);
-    PROGRESS = FROST_BLUE;
-    PROGRESS_SWEEP = FROST_TEAL;
+}
+
+/// Switches the kit to its dark theme with the Nord colors. Call once, after
+/// `gpui_kit::init`.
+pub fn apply(cx: &mut App) {
+    Theme::change(ThemeMode::Dark, None, cx);
+    Theme::update(cx, |theme| {
+        let background = rgba(POLAR_NIGHT).into();
+        let raised = rgba(lighter(POLAR_NIGHT, RAISED)).into();
+        let highlight = rgba(lighter(POLAR_NIGHT, HIGHLIGHT)).into();
+        let outline = rgba(lighter(POLAR_NIGHT, OUTLINE)).into();
+        let text = rgba(SNOW_STORM).into();
+        let muted_text = rgba(FROST_BLUE).into();
+        let focus = rgba(FROST_TEAL).into();
+        let pressed = rgba(tint(FROST_TEAL, 0.48)).into();
+        let pressed_hover = rgba(tint(FROST_TEAL, 0.54)).into();
+        let red = rgba(AURORA_RED).into();
+        let yellow = rgba(AURORA_YELLOW).into();
+        let green = rgba(AURORA_GREEN).into();
+
+        let colors = &mut theme.colors;
+        colors.background = background;
+        colors.foreground = text;
+        colors.muted = raised;
+        colors.muted_foreground = muted_text;
+        colors.border = outline;
+        colors.input = outline;
+        colors.ring = focus;
+        colors.caret = text;
+        colors.selection = pressed;
+        colors.accent = outline;
+        colors.accent_foreground = text;
+        colors.popover = raised;
+        colors.popover_foreground = text;
+        colors.group_box = raised;
+        colors.group_box_foreground = text;
+
+        colors.list = background;
+        colors.list_even = background;
+        colors.list_head = raised;
+        colors.list_hover = raised;
+        colors.list_active = outline;
+        colors.list_active_border = focus;
+
+        colors.primary = pressed;
+        colors.primary_hover = pressed_hover;
+        colors.primary_active = pressed;
+        colors.primary_foreground = text;
+        colors.secondary = highlight;
+        colors.secondary_hover = outline;
+        colors.secondary_active = pressed;
+        colors.secondary_foreground = text;
+        colors.button = highlight;
+        colors.button_hover = outline;
+        colors.button_active = pressed;
+        colors.button_foreground = text;
+        colors.button_primary = pressed;
+        colors.button_primary_hover = pressed_hover;
+        colors.button_primary_active = pressed;
+        colors.button_primary_foreground = text;
+        colors.button_secondary = highlight;
+        colors.button_secondary_hover = outline;
+        colors.button_secondary_active = pressed;
+        colors.button_secondary_foreground = text;
+
+        colors.danger = red;
+        colors.danger_foreground = text;
+        colors.warning = yellow;
+        colors.success = green;
+        colors.info = muted_text;
+        colors.progress_bar = muted_text;
+
+        // The scrollbar overlays the rows' right edge; an opaque track would cut into them.
+        colors.scrollbar = theme.transparent;
+        colors.scrollbar_thumb = rgba(lighter(POLAR_NIGHT, 0.21)).into();
+        colors.scrollbar_thumb_hover = rgba(lighter(POLAR_NIGHT, 0.30)).into();
+
+        colors.status_bar = raised;
+        colors.status_bar_border = outline;
+        colors.title_bar = raised;
+        colors.title_bar_border = outline;
+    });
 }
