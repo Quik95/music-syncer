@@ -2,7 +2,7 @@
 
 Music Syncer is a Linux app for comparing two music folders. It copies missing tracks in either direction and can overwrite changed files. You can use it with two local folders or with a phone connected over MTP in KDE Plasma.
 
-I started this project because I wanted to play around with [GPUI](https://www.gpui.rs/).
+I started this project because I wanted to play around with [GPUI](https://www.gpui.rs/). The UI uses [gpui-kit](https://crates.io/crates/gpui-kit).
 
 ![Two folders open side by side, with album art and audio metadata for the selected tracks](docs/screenshots/browser.png)
 
@@ -20,7 +20,7 @@ The left panel opens in your XDG Music folder (or your home folder if Music isn�
 nix run . -- "$HOME/Music" /path/to/other/library
 ```
 
-You can also click the path at the top of either panel to choose a folder. To browse a phone, connect it in USB file transfer mode and select a folder inside its storage in the KDE file picker. MTP access uses KDE’s `kmtpd` service.
+You can also click the folder button at the top right of either panel to choose a folder, or the arrow on the left to go up one level. To browse a phone, connect it in USB file transfer mode and select a folder inside its storage in the KDE file picker. MTP access uses KDE’s `kmtpd` service.
 
 ## Compare folders
 
@@ -34,7 +34,7 @@ Music Syncer walks subfolders and compares entries by name, type, and size. File
 
 ## Copy missing files
 
-Use `Copy →` or `← Copy` to copy the selected file or the missing items under the selected folder. `Copy all missing →` and `← Copy all missing` fill in the whole tree in that direction. Before copying, a dialog shows how many files and folders will be copied, their total size, and the target’s free space when available.
+Use `→ Copy` or `← Copy` to copy the selected file or the missing items under the selected folder; the arrow shows the direction. `→ Copy all missing` and `← Copy all missing` fill in the whole tree. Before copying, a dialog shows how many files and folders will be copied, their total size, and the target’s free space when available. After you confirm, the dialog shows progress and lets you cancel with `Stop` or `Escape`. Once copying ends, a notification shows what happened and stays open if anything failed or you stopped it.
 
 ![Confirmation dialog showing the source, destination, and size of a planned copy](docs/screenshots/copy-confirmation.png)
 
@@ -42,9 +42,9 @@ Music Syncer syncs local copies to disk before reporting them done. Copying only
 
 ## Check contents and overwrite changed files
 
-To check same-size files that exist on both sides, click `Check contents` for the selected file or folder, or `Check all contents` for the whole tree. Music Syncer compares them byte by byte in the background, updates each row as it finishes, and shows a progress toast with a `Stop` button.
+To check same-size files that exist on both sides, click `Check contents` for the selected file or folder, or `Check all contents` for the whole tree. Music Syncer compares them byte by byte in the background, updates each row as it goes, and shows a progress toast with a `Stop` button (`Escape` stops it too). When the check ends, a notification shows how many files changed.
 
-To replace changed files on the right with the version from the left, click `Overwrite →` for the selected entry or folder, or `Overwrite all changed →` for the whole tree. The confirmation dialog checks free space against the peak growth of the target as files are replaced one by one.
+To replace changed files on the right with the version from the left, click `→ Overwrite` for the selected entry or folder, or `→ Overwrite all changed` for the whole tree. The confirmation dialog checks free space against the peak growth of the target as files are replaced one by one.
 
 ![Confirmation dialog for overwriting changed files on the right after checking contents](docs/screenshots/overwrite-confirmation.png)
 
