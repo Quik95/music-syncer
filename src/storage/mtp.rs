@@ -9,7 +9,7 @@ use zbus::{
     zvariant::{Fd, OwnedObjectPath},
 };
 
-use crate::{
+use super::{
     listing::{Entry, EntryKind},
     location::MtpPath,
 };
@@ -265,11 +265,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        content::{self, CheckPlan},
-        location::Location,
+        diff::{
+            Side, TreeDiff,
+            content::{self, CheckPlan},
+        },
         progress::JobProgress,
+        storage::location::Location,
         sync::{self, Action, Plan},
-        tree_diff::{Side, TreeDiff},
     };
 
     const PHONE: &str = "MUSIC_SYNCER_TEST_MTP";

@@ -19,7 +19,7 @@ test *args:
 
 # Run the tests that need a phone, in a new folder inside `url` (mtp:/DEVICE/STORAGE/DIR)
 test-mtp url:
-    MUSIC_SYNCER_TEST_MTP={{ quote(url) }} cargo nextest run --run-ignored only --test-threads 1 mtp::tests
+    MUSIC_SYNCER_TEST_MTP={{ quote(url) }} cargo nextest run --run-ignored only --test-threads 1 storage::mtp::tests
 
 # Format Rust and Nix files (git hooks)
 fmt:

@@ -24,7 +24,7 @@ use zbus::{
     zvariant::{ObjectPath, OwnedValue, Value},
 };
 
-use crate::location::Location;
+use crate::storage::location::Location;
 
 const KDE_BACKEND: &str = "org.freedesktop.impl.portal.desktop.kde";
 const TITLE: &str = "Open Folder";

@@ -15,7 +15,7 @@ use super::{
     dir_column::DirColumn,
     tree_compare::{Scope, TreeCompare},
 };
-use crate::{listing::Listing, sync::Action, tree_diff::Side};
+use crate::{diff::Side, storage::listing::Listing, sync::Action};
 
 pub const KEY_CONTEXT: &str = "Browser";
 

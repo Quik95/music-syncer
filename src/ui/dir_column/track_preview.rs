@@ -79,7 +79,7 @@ pub fn render(preview: &Preview, cx: &App) -> AnyElement {
                         .object_fit(ObjectFit::Contain),
                 ),
                 None => frame.child(
-                    // Registered in `super::assets`; outside the kit's default icons.
+                    // Registered in `ui::assets`; outside the kit's default icons.
                     Icon::new(IconName::Disc3)
                         .large()
                         .text_color(theme.muted_foreground),

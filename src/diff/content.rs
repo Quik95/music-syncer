@@ -7,12 +7,10 @@ use std::{
 
 use anyhow::Context as _;
 
+use super::{Content, Side, TreeDiff};
 use crate::{
-    listing::EntryKind,
-    location::Location,
-    mtp,
     progress::JobProgress,
-    tree_diff::{Content, Side, TreeDiff},
+    storage::{listing::EntryKind, location::Location, mtp},
 };
 
 const BUFFER: usize = 256 * 1024;

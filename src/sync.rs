@@ -11,11 +11,13 @@ use std::{
 use anyhow::{Context as _, ensure};
 
 use crate::{
-    listing::EntryKind,
-    location::{Location, MtpPath},
-    mtp,
+    diff::{Content, Node, Presence, Side, TreeDiff},
     progress::JobProgress,
-    tree_diff::{Content, Node, Presence, Side, TreeDiff},
+    storage::{
+        listing::EntryKind,
+        location::{Location, MtpPath},
+        mtp,
+    },
 };
 
 /// What a [`Plan`] does.
@@ -419,7 +421,7 @@ mod tests {
             let mut diff = TreeDiff::new(Location::local("/left".into()), right);
             let found = files.into_iter().enumerate();
             diff.extend(found.map(|(index, (name, left, right))| {
-                crate::tree_diff::Found::Node(Node {
+                crate::diff::Found::Node(Node {
                     name: name.to_owned(),
                     file_name: name.into(),
                     kind: EntryKind::File { size: left },

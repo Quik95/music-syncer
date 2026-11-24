@@ -1,3 +1,6 @@
+mod folder_picker;
+mod track_preview;
+
 use std::{ops::Range, path::PathBuf};
 
 use gpui_kit::{
@@ -19,16 +22,21 @@ use gpui_kit::{
     uniform_list,
 };
 
+use folder_picker::Parent;
+use track_preview::{COVER_PIXELS, Preview};
+
 use super::{
-    SelectFirst, SelectLast, SelectNext, SelectNextPage, SelectPrevious, SelectPreviousPage,
-    folder_picker::{self, Parent},
-    page_rows, theme,
-    track_preview::{self, COVER_PIXELS, Preview},
+    list::{
+        Cursor, Move, SelectFirst, SelectLast, SelectNext, SelectNextPage, SelectPrevious,
+        SelectPreviousPage, page_rows,
+    },
+    theme,
 };
 use crate::{
-    cursor::{Cursor, Move},
-    listing::{EntryKind, Listing},
-    location::Location,
+    storage::{
+        listing::{EntryKind, Listing},
+        location::Location,
+    },
     track,
 };
 

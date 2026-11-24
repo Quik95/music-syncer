@@ -2,20 +2,15 @@ use std::{ffi::OsString, process::ExitCode};
 
 use directories::UserDirs;
 
-mod content;
-mod cursor;
-mod listing;
-mod location;
+mod diff;
 mod logging;
-mod mtp;
 mod progress;
+mod storage;
 mod sync;
 mod track;
-mod tree_diff;
 mod ui;
 
-use listing::Listing;
-use location::Location;
+use storage::{listing::Listing, location::Location};
 
 const USAGE: &str = "usage: music-syncer [LEFT RIGHT]  (local paths or mtp:/DEVICE/STORAGE/… URLs)";
 

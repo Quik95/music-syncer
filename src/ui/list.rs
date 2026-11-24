@@ -1,3 +1,31 @@
+//! Keyboard navigation shared by the views that show a list of rows.
+
+use gpui_kit::{UniformListScrollHandle, actions};
+
+actions!(
+    list,
+    [
+        SelectPrevious,
+        SelectNext,
+        SelectPreviousPage,
+        SelectNextPage,
+        SelectFirst,
+        SelectLast,
+    ]
+);
+
+/// Rows of a uniform list fully visible in its viewport during the last layout, at least one.
+pub fn page_rows(scroll: &UniformListScrollHandle, len: usize) -> usize {
+    let state = scroll.0.borrow();
+    let Some(size) = state.last_item_size.filter(|_| len > 0) else {
+        return 1;
+    };
+    let row_height = size.contents.height / len as f32;
+    let rows = (size.item.height / row_height).floor();
+    // Saturating float-to-int cast; NaN (zero-height rows) becomes 0.
+    (rows as usize).saturating_sub(1).max(1)
+}
+
 /// Position of the active entry in a list. Always within bounds of the length it was last
 /// updated with; `None` only for an empty list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
